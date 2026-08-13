@@ -5,3 +5,4 @@ requests
 dnspython
 python-telegram-bot>=20.0
 pytz
+python-telegram-bot[job-queue]>=20.0
