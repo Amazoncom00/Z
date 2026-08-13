@@ -6,59 +6,77 @@ import telebot
 from flask import Flask, jsonify
 from telebot import types
 import requests
+from pymongo import MongoClient
 
 # 1. Flask App Setup (Render को चालू रखने के लिए)
 app = Flask(__name__)
 
 @app.route("/")
 def home():
-    return jsonify({"status": "success", "message": "X Discount Bot is running smoothly!"})
+    return jsonify({"status": "success", "message": "X Discount Bot is running smoothly with MongoDB!"})
 
 # 2. Variables & Setup
 BOT_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 bot = telebot.TeleBot(BOT_TOKEN)
 
-# आपका नया Web App URL
-WEB_APP_URL = "https://script.google.com/macros/s/AKfycbwQFieKI2l8obd0GsMuYwE9IauJxPye-kZkZwWWxRsrUu1meh6cUGQ1nFrc6p-nyviJ/exec"
+# अपने MongoDB Atlas का कनेक्शन यूआरआई यहाँ डालें (या Render Environment Variables में सेट करें)
+MONGO_URI = os.environ.get("MONGO_URI", "mongodb+srv://devsagaraaaaa_db_user:hsUgTzN7Gd3aJ5E7@cluster0.yhnaz0g.mongodb.net/?appName=Cluster0")
+
 IMAGE_URL = "https://ik.imagekit.io/Rajmalik99/1786595036231.png"
 ADMIN_ID = 8844584255
 
 # यूजर के अस्थायी इनपुट स्टोर करने के लिए
 user_data = {}
 
-# --- Helper Functions for Google Sheet ---
-def get_user_from_sheet(user_id):
-    try:
-        response = requests.get(f"{WEB_APP_URL}?action=getUser&userId={user_id}", timeout=10)
-        if response.status_code == 200:
-            return response.json()
-    except Exception as e:
-        print(f"Error fetching user: {e}")
-    return None
+# --- MongoDB Setup ---
+try:
+    client = MongoClient(MONGO_URI)
+    db = client["x_discount_db"]
+    users_collection = db["users"]
+    print("MongoDB Connected Successfully!")
+except Exception as e:
+    print(f"MongoDB Connection Error: {e}")
 
-def save_user_to_sheet(user_id, free_trial=2):
+# --- Helper Functions for MongoDB ---
+def get_user_from_db(user_id):
     try:
-        payload = {
-            "action": "addUser",
-            "userId": str(user_id),
-            "freeTrial": free_trial,
-        }
-        requests.post(WEB_APP_URL, json=payload, timeout=10)
+        user = users_collection.find_one({"user_id": str(user_id)})
+        return user
     except Exception as e:
-        print(f"Error saving user: {e}")
+        print(f"Error fetching user from DB: {e}")
+        return None
 
-def update_user_details_in_sheet(user_id, free_trial, link, number):
+def save_user_to_db(user_id, first_name, free_trial=2):
     try:
-        payload = {
-            "action": "updateUser",
-            "userId": str(user_id),
+        user_doc = {
+            "user_id": str(user_id),
+            "first_name": first_name,
             "freeTrial": free_trial,
-            "link": link,
-            "number": number,
+            "link": "",
+            "number": ""
         }
-        requests.post(WEB_APP_URL, json=payload, timeout=10)
+        users_collection.update_one(
+            {"user_id": str(user_id)},
+            {"$setOnInsert": user_doc},
+            upsert=True
+        )
     except Exception as e:
-        print(f"Error updating user: {e}")
+        print(f"Error saving user to DB: {e}")
+
+def update_user_details_in_db(user_id, free_trial, link, number):
+    try:
+        users_collection.update_one(
+            {"user_id": str(user_id)},
+            {
+                "$set": {
+                    "freeTrial": free_trial,
+                    "link": link,
+                    "number": number
+                }
+            }
+        )
+    except Exception as e:
+        print(f"Error updating user in DB: {e}")
 
 # --- Telegram Bot Handlers ---
 
@@ -66,14 +84,15 @@ def update_user_details_in_sheet(user_id, free_trial, link, number):
 @bot.message_handler(commands=["start"])
 def send_welcome(message):
     user_id = str(message.from_user.id)
-    first_name = message.from_user.first_name
+    first_name = message.from_user.first_name or "User"
 
-    sheet_data = get_user_from_sheet(user_id)
+    user_doc = get_user_from_db(user_id)
 
-    if not sheet_data or not sheet_data.get("exists"):
-        save_user_to_sheet(user_id, free_trial=2)
+    if not user_doc:
+        save_user_to_db(user_id, first_name, free_trial=2)
 
-    welcome_text = f"Hello ! {first_name}\nThis is X DISCOUNT ⚔️"
+    # यहाँ यूजर का नाम सही से दिखेगा
+    welcome_text = f"Hello {first_name} !\nThis is X DISCOUNT ⚔️"
 
     markup = types.InlineKeyboardMarkup()
     btn_who = types.InlineKeyboardButton("Who are we", callback_data="who_are_we")
@@ -85,6 +104,7 @@ def send_welcome(message):
 @bot.callback_query_handler(func=lambda call: True)
 def callback_listener(call):
     user_id = str(call.from_user.id)
+    first_name = call.from_user.first_name or "User"
 
     if call.data == "who_are_we":
         caption_text = (
@@ -99,7 +119,6 @@ def callback_listener(call):
         btn_get_discount = types.InlineKeyboardButton("Get Discount", callback_data="get_discount")
         markup.add(btn_get_discount)
 
-        # पुराने मैसेज को डिलीट करते वक्त क्रैश से बचने के लिए Try-Except
         try:
             bot.delete_message(call.message.chat.id, call.message.message_id)
         except Exception:
@@ -122,8 +141,8 @@ def callback_listener(call):
             bot.send_message(call.message.chat.id, caption_text, parse_mode="HTML", reply_markup=markup)
 
     elif call.data == "get_discount":
-        sheet_data = get_user_from_sheet(user_id)
-        trials_left = sheet_data.get("freeTrial", 0) if sheet_data else 0
+        user_doc = get_user_from_db(user_id)
+        trials_left = user_doc.get("freeTrial", 0) if user_doc else 0
 
         msg_text = "This service is not free the service charge $50/DISCOUNT."
         markup = types.InlineKeyboardMarkup(row_width=2)
@@ -134,8 +153,8 @@ def callback_listener(call):
         bot.send_message(call.message.chat.id, msg_text, reply_markup=markup)
 
     elif call.data == "use_free_trial":
-        sheet_data = get_user_from_sheet(user_id)
-        trials_left = int(sheet_data.get("freeTrial", 0) if sheet_data else 0)
+        user_doc = get_user_from_db(user_id)
+        trials_left = int(user_doc.get("freeTrial", 0) if user_doc else 0)
 
         if trials_left <= 0:
             bot.answer_callback_query(call.id, "आपकी फ्री ट्रायल सीमा समाप्त हो चुकी है!", show_alert=True)
@@ -149,13 +168,13 @@ def callback_listener(call):
             link = user_data[user_id].get("link")
             number = user_data[user_id].get("number")
 
-            sheet_data = get_user_from_sheet(user_id)
-            current_trials = int(sheet_data.get("freeTrial", 2) if sheet_data else 2)
+            user_doc = get_user_from_db(user_id)
+            current_trials = int(user_doc.get("freeTrial", 2) if user_doc else 2)
             new_trials = max(0, current_trials - 1)
 
-            update_user_details_in_sheet(user_id, new_trials, link, number)
+            update_user_details_in_db(user_id, new_trials, link, number)
 
-            admin_msg = f"🚨 *New Discount Request* 🚨\n\n*User ID:* `{user_id}`\n*Link:* {link}\n*Number:* `{number}`"
+            admin_msg = f"🚨 *New Discount Request* 🚨\n\n*User ID:* `{user_id}`\n*Name:* {first_name}\n*Link:* {link}\n*Number:* `{number}`"
             try:
                 bot.send_message(ADMIN_ID, admin_msg, parse_mode="Markdown")
             except Exception as e:
@@ -204,9 +223,9 @@ def process_mobile_number(message):
 
 # 4. Threading & Execution
 def run_bot():
-    print("Telegram Bot starting...")
-    # 409 error से बचने के लिए non_blocking=False और timeout सेट किया है
-    bot.infinity_polling(timeout=10, long_polling_timeout=5)
+    print("Telegram Bot starting with polling...")
+    bot.remove_webhook()
+    bot.infinity_polling(skip_pending=True, timeout=10, long_polling_timeout=5)
 
 if __name__ == "__main__":
     threading.Thread(target=run_bot, daemon=True).start()
