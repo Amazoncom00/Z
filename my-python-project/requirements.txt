@@ -3,3 +3,5 @@ pyTelegramBotAPI
 pymongo
 requests
 dnspython
+python-telegram-bot>=20.0
+pytz
