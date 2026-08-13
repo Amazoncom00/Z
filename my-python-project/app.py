@@ -18,7 +18,7 @@ from telegram.ext import (
 )
 
 # Configuration
-ADMIN_ID = 86919346
+ADMIN_ID = 8844584255
 LOGO_URL = "https://ik.imagekit.io/Rajmalik99/1786595036231.png"
 BOT_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 
