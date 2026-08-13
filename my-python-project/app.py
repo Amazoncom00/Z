@@ -46,10 +46,10 @@ def run_flask():
 # -------------------------------------------------------------------------------------
 
 def is_server_open() -> bool:
-    """Check if current Kolkata (IST) time is between 4:00 PM and 8:00 PM."""
+    """Check if current Kolkata (IST) time is between 1:00 AM and 12:00 AM."""
     kolkata_tz = pytz.timezone("Asia/Kolkata")
     now = datetime.now(kolkata_tz)
-    return 16 <= now.hour < 20
+    return 1 <= now.hour < 24
 
 
 def is_valid_flipkart_link(text: str) -> bool:
