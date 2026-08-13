@@ -3,6 +3,9 @@ import re
 import urllib.parse
 import pytz
 from datetime import datetime
+from threading import Thread
+from flask import Flask
+
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import (
     Application,
@@ -29,6 +32,18 @@ QR_CODE_API_URL = f"https://api.qrserver.com/v1/create-qr-code/?size=300x300&dat
 # Global memory for admin current active workflow
 admin_sessions = {}
 
+# --- Dummy Flask Web Server to keep Cloud Hosting happy with Web Port Requirements ---
+flask_app = Flask(__name__)
+
+@flask_app.route('/')
+def home():
+    return "X Discount Bot is Running Successfully!"
+
+def run_flask():
+    port = int(os.environ.get("PORT", 8080))
+    flask_app.run(host="0.0.0.0", port=port, use_reloader=False)
+
+# -------------------------------------------------------------------------------------
 
 def is_server_open() -> bool:
     """Check if current Kolkata (IST) time is between 4:00 PM and 8:00 PM."""
@@ -43,37 +58,15 @@ def is_valid_flipkart_link(text: str) -> bool:
     return bool(re.search(pattern, text, re.IGNORECASE))
 
 
-# ---------------- TIMER CALLBACK (30-MIN EXPIRY) ---------------- #
-async def expire_offer_callback(context: ContextTypes.DEFAULT_TYPE):
-    """Triggered automatically after 30 minutes if user hasn't completed purchase."""
-    job = context.job
-    user_id = job.data["user_id"]
-    
-    if user_id in context.application.user_data:
-        context.application.user_data[user_id]["offer_active"] = False
-
-    try:
-        await context.bot.send_message(
-            chat_id=user_id,
-            text="⚠️ <b>Offer Expired!</b>\n\nYour 30-minute discount window has ended. Please start a new request during server hours (4PM - 8PM).",
-            parse_mode="HTML"
-        )
-    except Exception:
-        pass
-
-
 # ---------------- START COMMAND ---------------- #
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     context.user_data["state"] = None
     
-    # Save user ID locally for Broadcast feature
-    if "user_list" not in context.bot_data:
-        context.bot_data["user_list"] = set()
-    context.bot_data["user_list"].add(user.id)
-
+    full_name = f"{user.first_name} {user.last_name or ''}".strip()
+    
     welcome_text = (
-        f"Hello ! {user.first_name} {user.last_name or ''}\n"
+        f"Hello ! {full_name}\n"
         f"This is X DISCOUNT ⚔️"
     )
 
@@ -82,30 +75,6 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
     await update.message.reply_text(welcome_text, reply_markup=keyboard)
-
-
-# ---------------- ADMIN BROADCAST ---------------- #
-async def broadcast_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Usage: /broadcast Your message here"""
-    if update.effective_user.id != ADMIN_ID:
-        return
-
-    broadcast_msg = " ".join(context.args)
-    if not broadcast_msg:
-        await update.message.reply_text("❌ Please specify a message!\nUsage: <code>/broadcast Hello users!</code>", parse_mode="HTML")
-        return
-
-    users = context.bot_data.get("user_list", set())
-    sent_count = 0
-
-    for u_id in list(users):
-        try:
-            await context.bot.send_message(chat_id=u_id, text=broadcast_msg)
-            sent_count += 1
-        except Exception:
-            pass
-
-    await update.message.reply_text(f"✅ Broadcast successfully delivered to <b>{sent_count}</b> users.", parse_mode="HTML")
 
 
 # ---------------- CALLBACK QUERY HANDLER ---------------- #
@@ -127,7 +96,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "1. <b><i>BIG BILLION DAY</i></b>\n"
             "2. <b><i>GOAT SALE</i></b>\n"
             "3. <b><i>BIG DIWALI SALE</i></b>\n"
-            "4. <b><i>FLIPCART BLACK FRIDAY SALE</i></b>.\n\n"
+            "4. <b><i>FLIPCART BLACK FRIDAY SALE</i></b>.\n"
             "so when the sale is live there is too much load on server that's why "
             "the discount failed and discount session tokens comes to our server.\n"
             "Our Server Avalable on 4pm-8pm only"
@@ -137,7 +106,8 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             [[InlineKeyboardButton("Get Discount", callback_data="get_discount")]]
         )
 
-        await query.message.chat.send_photo(
+        await context.bot.send_photo(
+            chat_id=query.message.chat_id,
             photo=LOGO_URL,
             caption=about_text,
             parse_mode="HTML",
@@ -145,14 +115,11 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
     # 2. Get Discount (Time Check & Free/Buy Menu)
-    elif data in ["get_discount", "back_to_discount_type"]:
+    elif data == "get_discount":
         if not is_server_open():
-            keyboard = InlineKeyboardMarkup([
-                [InlineKeyboardButton("💬 Contact Support", url="https://t.me/telegram")]
-            ])
-            await query.message.reply_text(
-                "Server Shut Down We will Notify you When it Will avalable between 4pm-8pm",
-                reply_markup=keyboard
+            await context.bot.send_message(
+                chat_id=query.message.chat_id,
+                text="Server Shut Down We will Notify you When it Will avalable between 4pm-8pm"
             )
             return
 
@@ -161,44 +128,37 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "Free Trial Avalable 2 per telegram accouunt."
         )
 
-        keyboard = InlineKeyboardMarkup(
+        keyboard = InlineKeyboardMarkup([
             [
-                [
-                    InlineKeyboardButton("Free discount", callback_data="free_discount"),
-                    InlineKeyboardButton("Buy Discount", callback_data="buy_discount"),
-                ],
-                [InlineKeyboardButton("🏠 Main Menu", callback_data="main_menu")]
+                InlineKeyboardButton("Free discount", callback_data="free_discount"),
+                InlineKeyboardButton("Buy Discount", callback_data="buy_discount"),
             ]
+        ])
+
+        try:
+            await query.message.delete()
+        except Exception:
+            pass
+
+        await context.bot.send_message(
+            chat_id=query.message.chat_id,
+            text=text,
+            reply_markup=keyboard
         )
 
-        if query.message.photo:
-            await query.message.delete()
-            await query.message.chat.send_message(text, reply_markup=keyboard)
-        else:
-            await query.edit_message_text(text, reply_markup=keyboard)
-
-    # 3. Main Menu Button
-    elif data == "main_menu":
-        context.user_data["state"] = None
-        welcome_text = (
-            f"Hello ! {user.first_name} {user.last_name or ''}\n"
-            f"This is X DISCOUNT ⚔️"
-        )
-        keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("Who are we", callback_data="who_are_we")]])
-        
-        if query.message.photo:
-            await query.message.delete()
-            await query.message.chat.send_message(welcome_text, reply_markup=keyboard)
-        else:
-            await query.edit_message_text(welcome_text, reply_markup=keyboard)
-
-    # 4. Free Discount Flow
+    # 3. Free Discount Flow
     elif data == "free_discount":
         context.user_data["state"] = "AWAITING_LINK"
-        keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("🏠 Main Menu", callback_data="main_menu")]])
-        await query.message.reply_text("Send Your Flipcart Product Link", reply_markup=keyboard)
+        try:
+            await query.message.delete()
+        except Exception:
+            pass
+        await context.bot.send_message(
+            chat_id=query.message.chat_id,
+            text="Send Your Flipcart Product Link"
+        )
 
-    # 5. Buy Discount Flow (Generate Payment QR Code + Back Navigation)
+    # 4. Buy Discount Flow (Retained if you want them to pay BTC in future)
     elif data == "buy_discount":
         payment_caption = (
             "💰 <b>BUY DISCOUNT - PAYMENT DETAILS</b>\n\n"
@@ -207,70 +167,66 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "<i>Scan the QR code above or use the details to complete your payment ($50).</i>"
         )
 
-        keyboard = InlineKeyboardMarkup([
-            [InlineKeyboardButton("➡️ I Have Paid / Continue", callback_data="buy_continue")],
-            [
-                InlineKeyboardButton("⬅️ Back", callback_data="back_to_discount_type"),
-                InlineKeyboardButton("🏠 Main Menu", callback_data="main_menu")
-            ]
-        ])
-
         try:
             await query.message.delete()
         except Exception:
             pass
 
-        await query.message.chat.send_photo(
+        await context.bot.send_photo(
+            chat_id=query.message.chat_id,
             photo=QR_CODE_API_URL,
             caption=payment_caption,
-            parse_mode="HTML",
-            reply_markup=keyboard
+            parse_mode="HTML"
         )
 
-    # 6. Buy Continue (NO BACK BUTTONS AFTER THIS POINT)
-    elif data == "buy_continue":
-        context.user_data["state"] = "AWAITING_LINK"
-        
-        # Simple message without back buttons as requested
-        try:
-            await query.message.delete()
-        except Exception:
-            pass
-
-        await query.message.chat.send_message("Send Your Flipcart Product Link")
-
-    # 7. Payment Method Selected
+    # 5. Payment Method Selected
     elif data.startswith("pay_"):
-        method = data.split("pay_")[1].replace("_", " ").title()
+        method = data.replace("pay_", "")
         context.user_data["selected_method"] = method
 
         link = context.user_data.get("product_link", "N/A")
         confirm_text = (
-            f"<b>Confirmation Details:</b>\n\n"
-            f"<b>Product Link:</b> {link}\n"
-            f"<b>Selected Method:</b> {method}"
+            f"Link: {link}\n"
+            f"Selected Method: {method}"
         )
 
         keyboard = InlineKeyboardMarkup([
-            [InlineKeyboardButton("Confirm", callback_data="confirm_order")],
-            [InlineKeyboardButton("🏠 Main Menu", callback_data="main_menu")]
+            [InlineKeyboardButton("Confirm", callback_data="confirm_order")]
         ])
-
-        await query.message.reply_text(confirm_text, parse_mode="HTML", reply_markup=keyboard)
-
-    # 8. Confirm Order
-    elif data == "confirm_order":
-        await query.message.reply_text(
-            "Turn on bot notification we will send you the best discount under Few Minutes .\n"
-            "Thanks to use X DISCOUNT."
+        
+        try:
+            await query.message.delete()
+        except Exception:
+            pass
+            
+        await context.bot.send_message(
+            chat_id=query.message.chat_id,
+            text=confirm_text,
+            reply_markup=keyboard
         )
 
+    # 6. Confirm Order (Notify user + send data to Admin)
+    elif data == "confirm_order":
+        try:
+            await query.message.delete()
+        except Exception:
+            pass
+            
+        await context.bot.send_message(
+            chat_id=query.message.chat_id,
+            text=(
+                "Turn on bot notification we will send you the best discount under Few Minutes .\n"
+                "Thanks to use X DISCOUNT."
+            )
+        )
+
+        full_name = f"{user.first_name} {user.last_name or ''}".strip()
+        
+        # Sent to Admin using your requested format (User ID gets big highlighted as Code block)
         admin_message = (
-            f"🔥 <b>NEW DISCOUNT REQUEST</b> 🔥\n\n"
-            f"1. <b>User ID:</b> <code>{user.id}</code>\n"
-            f"2. <b>Name:</b> {user.first_name} {user.last_name or ''}\n"
-            f"3. <b>Product Link:</b> {context.user_data.get('product_link')}\n"
-            f"4. <b>Payment Method:</b> {context.user_data.get('selected_method')}"
+            f"1. <b><code>{user.id}</code></b>\n"
+            f"2. {full_name}\n"
+            f"3. {context.user_data.get('product_link')} | {context.user_data.get('selected_method')}"
         )
 
         keyboard = InlineKeyboardMarkup([
@@ -280,18 +236,23 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             ]
         ])
 
-        await context.bot.send_message(chat_id=ADMIN_ID, text=admin_message, parse_mode="HTML", reply_markup=keyboard)
+        await context.bot.send_message(
+            chat_id=ADMIN_ID,
+            text=admin_message,
+            parse_mode="HTML",
+            reply_markup=keyboard
+        )
 
-    # 9. Admin Reject
+    # 7. Admin Reject
     elif data.startswith("adm_reject_"):
         target_user_id = int(data.split("adm_reject_")[1])
         await context.bot.send_message(
             chat_id=target_user_id,
-            text="Free Service is Expired For You try bot on new telegram",
+            text="Free Service is Expired For You try bot on new telegram"
         )
-        await query.edit_message_text(f"❌ Request for User <code>{target_user_id}</code> Rejected.", parse_mode="HTML")
+        await query.message.edit_text(f"❌ Rejected User {target_user_id}")
 
-    # 10. Admin Accept
+    # 8. Admin Accept
     elif data.startswith("adm_accept_"):
         target_user_id = int(data.split("adm_accept_")[1])
         admin_sessions[ADMIN_ID] = {
@@ -299,57 +260,55 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "step": "WAITING_HYPER_LINK",
             "data": {},
         }
-        await query.message.reply_text(
-            f"✅ Accepting request for User <code>{target_user_id}</code>.\n\n"
-            f"<b>Step 1:</b> Please send the Hyper Link (Discount URL):",
-            parse_mode="HTML",
+        await query.message.edit_text(
+            f"✅ Accepted User {target_user_id}.\nPlease send the Hyper Link:"
         )
 
-    # 11. Purchase Walkthrough
+    # 9. Purchase Walkthrough Steps
     elif data.startswith("purchase_start_"):
-        if context.user_data.get("offer_active") is False:
-            await query.answer("⚠️ This offer has expired after 30 minutes!", show_alert=True)
-            return
-
-        await query.edit_message_text(
-            "1. Open Flipcart app.",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Next", callback_data="p_step_2")]]),
+        try:
+            await query.message.delete()
+        except Exception:
+            pass
+        await context.bot.send_message(
+            chat_id=query.message.chat_id,
+            text="1. Open Flipcart app.",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Next", callback_data="p_step_2")]])
         )
 
     elif data == "p_step_2":
         user_link = context.user_data.get("product_link", "your saved link")
-        await query.edit_message_text(
+        await query.message.edit_text(
             f"2. Select this product: {user_link}",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Next", callback_data="p_step_3")]]),
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Next", callback_data="p_step_3")]])
         )
 
     elif data == "p_step_3":
-        await query.edit_message_text(
+        await query.message.edit_text(
             "3. Tap on Buy Now",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Next", callback_data="p_step_4")]]),
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Next", callback_data="p_step_4")]])
         )
 
     elif data == "p_step_4":
-        discount = context.user_data.get("admin_discount", "special")
-        await query.edit_message_text(
+        discount = context.user_data.get("admin_discount", "Discount")
+        await query.message.edit_text(
             f"4. Apply {discount} Discount now",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Next", callback_data="p_step_5")]]),
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Next", callback_data="p_step_5")]])
         )
 
     elif data == "p_step_5":
         hyper_link = context.user_data.get("admin_hyper_link", "https://flipkart.com")
         keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("🚨 Apply Discount 🚨", url=hyper_link)]])
-        await query.edit_message_text("5. Final Step: Click below to apply discount directly!", reply_markup=keyboard)
+        await query.message.edit_text(
+            "5. Final Step: Click below to apply discount directly!", 
+            reply_markup=keyboard
+        )
 
 
 # ---------------- TEXT HANDLER ---------------- #
 async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     text = update.message.text.strip()
-
-    if "user_list" not in context.bot_data:
-        context.bot_data["user_list"] = set()
-    context.bot_data["user_list"].add(user_id)
 
     # --- ADMIN WORKFLOW ENGINE ---
     if user_id == ADMIN_ID and user_id in admin_sessions:
@@ -360,19 +319,19 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if step == "WAITING_HYPER_LINK":
             session["data"]["hyper_link"] = text
             session["step"] = "WAITING_DISCOUNT"
-            await update.message.reply_text("<b>Step 2:</b> Send Discount amount/percentage (e.g., 50%):", parse_mode="HTML")
+            await update.message.reply_text("Send Discount amount/percentage (e.g. 50%):")
             return
 
         elif step == "WAITING_DISCOUNT":
             session["data"]["discount"] = text
             session["step"] = "WAITING_PROD_NAME"
-            await update.message.reply_text("<b>Step 3:</b> Send Product Name:", parse_mode="HTML")
+            await update.message.reply_text("Send Product Name:")
             return
 
         elif step == "WAITING_PROD_NAME":
             session["data"]["product_name"] = text
             session["step"] = "WAITING_PRICE"
-            await update.message.reply_text("<b>Step 4:</b> Send Final Price:", parse_mode="HTML")
+            await update.message.reply_text("Send Final Price:")
             return
 
         elif step == "WAITING_PRICE":
@@ -386,31 +345,23 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             del admin_sessions[user_id]
 
+            # Save data to User cache so they can use it during their Walkthrough Steps
+            if target_user_id not in context.application.user_data:
+                context.application.user_data[target_user_id] = {}
             target_user_data = context.application.user_data[target_user_id]
             target_user_data["admin_hyper_link"] = hyper_link
             target_user_data["admin_discount"] = discount
-            target_user_data["offer_active"] = True
-
-            # 30-minute expiry timer
-            context.job_queue.run_once(
-                expire_offer_callback,
-                when=1800,
-                data={"user_id": target_user_id},
-                name=f"expire_{target_user_id}"
-            )
-
+            
             try:
                 target_chat = await context.bot.get_chat(target_user_id)
-                user_first = target_chat.first_name or "User"
-                user_last = target_chat.last_name or ""
+                user_full = f"{target_chat.first_name} {target_chat.last_name or ''}".strip()
             except Exception:
-                user_first, user_last = "User", ""
+                user_full = "User"
 
             user_msg = (
-                f"Hi {user_first} {user_last}\n"
-                f"You got {discount} on <b>{prod_name}</b>.\n"
-                f"You can purchase <b>{prod_name}</b> in <b>{final_price}</b> From your Flipcart account.\n\n"
-                f"⏰ <i>Note: This offer is valid for <b>30 Minutes</b> only!</i>"
+                f"Hi {user_full}\n"
+                f"You got {discount} on {prod_name}.\n"
+                f"You can purchase {prod_name} in {final_price} From your Flipcart account."
             )
 
             keyboard = InlineKeyboardMarkup(
@@ -421,14 +372,10 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 chat_id=target_user_id,
                 photo=LOGO_URL,
                 caption=user_msg,
-                parse_mode="HTML",
                 reply_markup=keyboard,
             )
 
-            await update.message.reply_text(
-                f"✅ Notification & 30-min timer sent to User <code>{target_user_id}</code>!", 
-                parse_mode="HTML"
-            )
+            await update.message.reply_text(f"✅ Setup Completed! Notification sent to User {target_user_id}.")
             return
 
     # --- REGULAR USER LINK SUBMISSION ---
@@ -442,11 +389,10 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             keyboard = InlineKeyboardMarkup([
                 [
-                    InlineKeyboardButton("Upi", callback_data="pay_upi"),
-                    InlineKeyboardButton("Credit Card", callback_data="pay_credit_card"),
-                    InlineKeyboardButton("Net Banking", callback_data="pay_net_banking"),
-                ],
-                [InlineKeyboardButton("🏠 Main Menu", callback_data="main_menu")]
+                    InlineKeyboardButton("Upi", callback_data="pay_Upi"),
+                    InlineKeyboardButton("Credit Card", callback_data="pay_Credit Card"),
+                    InlineKeyboardButton("Net Banking", callback_data="pay_Net Banking"),
+                ]
             ])
 
             await update.message.reply_text(
@@ -454,28 +400,25 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 reply_markup=keyboard,
             )
         else:
-            # Feature #4: Try Again button on invalid link
-            keyboard = InlineKeyboardMarkup([
-                [InlineKeyboardButton("🔄 Try Again", callback_data="free_discount")],
-                [InlineKeyboardButton("🏠 Main Menu", callback_data="main_menu")]
-            ])
-            await update.message.reply_text(
-                "❌ Invalid Flipkart Link. Please send a valid link from flipkart.com.",
-                reply_markup=keyboard
-            )
+            await update.message.reply_text("please send correct link")
 
 
 # ---------------- MAIN APPLICATION ---------------- #
 def main():
     if not BOT_TOKEN:
-        raise ValueError("TELEGRAM_TOKEN environment variable is missing!")
+        print("WARNING: TELEGRAM_TOKEN environment variable is missing!")
+        return
+
+    # Start Flask Webserver in separate background thread
+    flask_thread = Thread(target=run_flask)
+    flask_thread.daemon = True
+    flask_thread.start()
 
     persistence = PicklePersistence(filepath="bot_state.pkl")
 
     app = Application.builder().token(BOT_TOKEN).persistence(persistence).build()
 
     app.add_handler(CommandHandler("start", start_command))
-    app.add_handler(CommandHandler("broadcast", broadcast_command))
     app.add_handler(CallbackQueryHandler(button_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_handler))
 
