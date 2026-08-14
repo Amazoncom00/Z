@@ -449,8 +449,8 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         other_btn = "Hindi Tutorial" if data == "tutorial_eng" else "English Tutorial"
         other_call = "tutorial_hin" if data == "tutorial_eng" else "tutorial_eng"
         
-        # Decide back destination
-        back_dest = "resend_qualified_msg" if context.user_data.get("is_in_ready_flow") else "direct_start"
+        is_ready = context.bot_data.get("user_flow_states", {}).get(user.id) == "READY"
+        back_dest = "resend_qualified_msg" if is_ready else "direct_start"
 
         kb = InlineKeyboardMarkup([
             [InlineKeyboardButton(other_btn, callback_data=other_call)],
@@ -461,7 +461,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await send_dynamic_media(context, chat_id, tag, caption="Here is the tutorial:", reply_markup=kb)
 
     elif data == "direct_start":
-        context.user_data["is_in_ready_flow"] = False
+        context.bot_data.setdefault("user_flow_states", {})[user.id] = "NONE"
         trials_left = user_records.get(user.id, {}).get("trial", 0)
         if trials_left <= 0:
             try: await query.message.delete()
@@ -527,7 +527,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     elif data.startswith("adm_accept_"):
         target_id = int(data.split("adm_accept_")[1])
-        # Start Session silently.
         admin_sessions[ADMIN_ID] = {"target_user_id": target_id, "step": "WAITING_HYPER_LINK", "data": {}}
         await query.message.edit_text(f"✅ Accepted User {target_id}.\nPlease send the Hyper Link:")
 
@@ -544,9 +543,10 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif data == "user_continue_ready":
         try: await query.message.delete()
         except: pass
-        d_data = context.user_data.get("final_discount_data", {})
+        
+        d_data = context.bot_data.get("ready_links", {}).get(user.id, {})
         if not d_data:
-            await context.bot.send_message(chat_id=chat_id, text="Data fetch error. Please contact support.")
+            await context.bot.send_message(chat_id=chat_id, text="❌ Data fetch error. Please contact support.")
             return
 
         text = (f"🎉 You got <b>{d_data.get('discount')}</b> on <b>{d_data.get('product_name')}</b>.\n"
@@ -558,7 +558,9 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             
         kb = InlineKeyboardMarkup([[InlineKeyboardButton("🔴 Buy Now 🔴", url=url)]])
         await context.bot.send_message(chat_id=chat_id, text=text, parse_mode="HTML", reply_markup=kb)
-        context.user_data["is_in_ready_flow"] = False
+        
+        if user.id in context.bot_data.get("user_flow_states", {}):
+            context.bot_data["user_flow_states"][user.id] = "DONE"
 
 
 # ---------------- TEXT & MEDIA HANDLER ---------------- #
@@ -578,7 +580,6 @@ async def media_and_text_handler(update: Update, context: ContextTypes.DEFAULT_T
         code = text.upper()
         current_rec = user_records.get(user_id, {})
         
-        # Secret Promo Code
         if code == "ADMINREFFER009":
             new_trials = current_rec.get("trial", 0) + 9
             await sync_user_to_channel(context, user_id, current_rec.get("status", "Active"), new_trials, current_rec.get("last_report", 0.0), current_rec.get("refer_code", "None"), current_rec.get("refer_from", "None"), current_rec.get("reward_given", "False"))
@@ -747,36 +748,35 @@ async def media_and_text_handler(update: Update, context: ContextTypes.DEFAULT_T
             await update.message.reply_text("Send Final Price:")
             return
         elif step == "WAITING_PRICE":
-            data = session["data"]
-            del admin_sessions[user_id]
-            
-            # Format price beautifully
-            final_price_fmt = format_inr(text)
-            
-            # Save final securely in user data cache
-            target_data = context.application.user_data.setdefault(target_id, {})
-            target_data["final_discount_data"] = {
-                "hyper_link": data["hyper_link"],
-                "discount": data["discount"],
-                "product_name": data["product_name"],
-                "final_price": final_price_fmt
-            }
-            target_data["is_in_ready_flow"] = True
-            
-            kb = InlineKeyboardMarkup([
-                [InlineKeyboardButton("Continue", callback_data="user_continue_ready"), InlineKeyboardButton("Tutorial", callback_data="tutorial_eng")]
-            ])
-            msg_text = "🎉 <b>Congratulations!</b>\nYour link is qualified for a discount."
-            
             try:
-                # Send the "Ready" message to the user instantly
-                await send_dynamic_media(context, target_id, "Ready", msg_text, kb)
-                # Ensure the Admin is always replied to
-                await update.message.reply_text(f"✅ Setup Completed! Qualified message successfully sent to User {target_id}.")
-            except Exception as e:
-                # Absolute safety net to ensure Admin never gets stuck
-                await update.message.reply_text(f"✅ Setup Completed in memory, but ❌ Failed to notify User {target_id}. They might have blocked the bot or chat is missing. Error: {e}")
+                data = session["data"]
+                final_price_fmt = format_inr(text)
                 
+                # Safely store robust memory cross-users
+                context.bot_data.setdefault("ready_links", {})[target_id] = {
+                    "hyper_link": data["hyper_link"],
+                    "discount": data["discount"],
+                    "product_name": data["product_name"],
+                    "final_price": final_price_fmt
+                }
+                context.bot_data.setdefault("user_flow_states", {})[target_id] = "READY"
+                
+                kb = InlineKeyboardMarkup([
+                    [InlineKeyboardButton("Continue", callback_data="user_continue_ready"), InlineKeyboardButton("Tutorial", callback_data="tutorial_eng")]
+                ])
+                msg_text = "🎉 <b>Congratulations!</b>\nYour link is qualified for a discount."
+                
+                try:
+                    await send_dynamic_media(context, target_id, "Ready", msg_text, kb)
+                    await update.message.reply_text(f"✅ Setup Completed! Qualified message successfully sent to User <code>{target_id}</code>.", parse_mode="HTML")
+                except Exception as e:
+                    await update.message.reply_text(f"✅ Setup Completed in memory, but ❌ Failed to notify User <code>{target_id}</code>. Error: {e}", parse_mode="HTML")
+                    
+            except Exception as e:
+                await update.message.reply_text(f"❌ Fatal Error generating link: {e}")
+            finally:
+                if user_id in admin_sessions:
+                    del admin_sessions[user_id]
             return
 
     # --- REGULAR USER WORKFLOWS ---
