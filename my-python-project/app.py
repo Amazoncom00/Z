@@ -41,15 +41,9 @@ def run_flask():
     port = int(os.environ.get("PORT", 8080))
     flask_app.run(host="0.0.0.0", port=port, use_reloader=False)
 
-# ---------------- DATABASE (CHANNEL) HELPERS ---------------- #
-def generate_unique_referral_code(user_records):
-    while True:
-        code = ''.join(random.choices(string.ascii_uppercase + string.digits, k=7))
-        if not any(r.get("refer_code") == code for r in user_records.values()):
-            return code
-
+# ---------------- HELPERS & FORMATTERS ---------------- #
 def format_inr(number_str: str) -> str:
-    """Formats 79812 into ₹79,812"""
+    """Formats 79812 into ₹79,812 perfectly."""
     num = re.sub(r'\D', '', number_str)
     if not num: 
         return f"₹{number_str}"
@@ -63,6 +57,12 @@ def format_inr(number_str: str) -> str:
         rest = rest[:-2]
     chunks.reverse()
     return f"₹{','.join(chunks)},{last_three}"
+
+def generate_unique_referral_code(user_records):
+    while True:
+        code = ''.join(random.choices(string.ascii_uppercase + string.digits, k=7))
+        if not any(r.get("refer_code") == code for r in user_records.values()):
+            return code
 
 async def sync_user_to_channel(context: ContextTypes.DEFAULT_TYPE, user_id: int, status: str, trial: int, last_report: float = 0.0, refer_code: str = "None", refer_from: str = "None", reward_given: str = "False"):
     user_records = context.bot_data.setdefault("user_records", {})
@@ -151,10 +151,12 @@ async def send_dynamic_media(context, chat_id, tag, caption=None, reply_markup=N
             await context.bot.send_video(chat_id=chat_id, video=file_id, caption=caption, reply_markup=reply_markup, parse_mode="HTML")
         elif file_type == "document":
             await context.bot.send_document(chat_id=chat_id, document=file_id, caption=caption, reply_markup=reply_markup, parse_mode="HTML")
+        else:
+            await context.bot.send_message(chat_id=chat_id, text=caption, reply_markup=reply_markup, parse_mode="HTML")
     except Exception:
+        # Failsafe if media is invalid or expired
         await context.bot.send_message(chat_id=chat_id, text=caption, reply_markup=reply_markup, parse_mode="HTML")
 
-# ---------------- HELPERS ---------------- #
 def is_valid_flipkart_link(text: str) -> bool:
     return bool(re.search(r"flipkart", text, re.IGNORECASE))
 
@@ -374,7 +376,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     elif data == "report_continue":
         last_rep = user_records.get(user.id, {}).get("last_report", 0.0)
-        if time.time() - last_rep < 604800: # 7 days
+        if time.time() - last_rep < 604800:
             try: await query.message.delete()
             except: pass
             kb = InlineKeyboardMarkup([[InlineKeyboardButton("Back", callback_data="terms")]])
@@ -525,7 +527,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     elif data.startswith("adm_accept_"):
         target_id = int(data.split("adm_accept_")[1])
-        # Start Session silently, user gets nothing until step 4 finishes.
+        # Start Session silently.
         admin_sessions[ADMIN_ID] = {"target_user_id": target_id, "step": "WAITING_HYPER_LINK", "data": {}}
         await query.message.edit_text(f"✅ Accepted User {target_id}.\nPlease send the Hyper Link:")
 
@@ -550,7 +552,11 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         text = (f"🎉 You got <b>{d_data.get('discount')}</b> on <b>{d_data.get('product_name')}</b>.\n"
                 f"You can purchase this product for <b>{d_data.get('final_price')}</b>.")
         
-        kb = InlineKeyboardMarkup([[InlineKeyboardButton("🔴 Buy Now 🔴", url=d_data.get('hyper_link'))]])
+        url = d_data.get('hyper_link', 'https://flipkart.com')
+        if not url.startswith(('http://', 'https://')):
+            url = 'https://' + url
+            
+        kb = InlineKeyboardMarkup([[InlineKeyboardButton("🔴 Buy Now 🔴", url=url)]])
         await context.bot.send_message(chat_id=chat_id, text=text, parse_mode="HTML", reply_markup=kb)
         context.user_data["is_in_ready_flow"] = False
 
@@ -564,7 +570,6 @@ async def media_and_text_handler(update: Update, context: ContextTypes.DEFAULT_T
     state = context.user_data.get("state")
     text = update.message.text.strip() if update.message.text else update.message.caption.strip() if update.message.caption else ""
     
-    # Handle Referral Code Submission
     if state == "WAITING_REFERRAL_CODE":
         if text.startswith("/"):
             context.user_data["state"] = None
@@ -609,7 +614,6 @@ async def media_and_text_handler(update: Update, context: ContextTypes.DEFAULT_T
         await update.message.reply_text("✅ Referral Code accepted! You have received 1 Free Discount link.")
         return
 
-    # Handle Voice Report Submissions
     if state == "WAITING_VOICE_REPORT":
         if not update.message.voice:
             await update.message.reply_text("❌ Please send a Voice Note.")
@@ -746,8 +750,10 @@ async def media_and_text_handler(update: Update, context: ContextTypes.DEFAULT_T
             data = session["data"]
             del admin_sessions[user_id]
             
+            # Format price beautifully
             final_price_fmt = format_inr(text)
-
+            
+            # Save final securely in user data cache
             target_data = context.application.user_data.setdefault(target_id, {})
             target_data["final_discount_data"] = {
                 "hyper_link": data["hyper_link"],
@@ -757,15 +763,20 @@ async def media_and_text_handler(update: Update, context: ContextTypes.DEFAULT_T
             }
             target_data["is_in_ready_flow"] = True
             
-            # Instantly Notify User 
             kb = InlineKeyboardMarkup([
                 [InlineKeyboardButton("Continue", callback_data="user_continue_ready"), InlineKeyboardButton("Tutorial", callback_data="tutorial_eng")]
             ])
             msg_text = "🎉 <b>Congratulations!</b>\nYour link is qualified for a discount."
-            await send_dynamic_media(context, target_id, "Ready", msg_text, kb)
             
-            # Acknowledge Admin
-            await update.message.reply_text(f"✅ Setup Completed! Qualified message successfully sent to User {target_id}.")
+            try:
+                # Send the "Ready" message to the user instantly
+                await send_dynamic_media(context, target_id, "Ready", msg_text, kb)
+                # Ensure the Admin is always replied to
+                await update.message.reply_text(f"✅ Setup Completed! Qualified message successfully sent to User {target_id}.")
+            except Exception as e:
+                # Absolute safety net to ensure Admin never gets stuck
+                await update.message.reply_text(f"✅ Setup Completed in memory, but ❌ Failed to notify User {target_id}. They might have blocked the bot or chat is missing. Error: {e}")
+                
             return
 
     # --- REGULAR USER WORKFLOWS ---
@@ -820,14 +831,9 @@ def main():
     app.add_handler(CommandHandler("unblock", unblock_command))
     app.add_handler(CallbackQueryHandler(button_handler))
     
-    # Telegram Stars Handlers
     app.add_handler(PreCheckoutQueryHandler(precheckout_callback))
     app.add_handler(MessageHandler(filters.SUCCESSFUL_PAYMENT, successful_payment_callback))
-    
-    # Text, Photos, Videos, Voice
     app.add_handler(MessageHandler(filters.ChatType.PRIVATE & ~filters.COMMAND, media_and_text_handler))
-    
-    # 2-WAY DB SYNC
     app.add_handler(MessageHandler(filters.ChatType.CHANNEL, channel_db_sync_handler))
 
     print("Bot is running 24/7 with Channel Backend Database & Telegram Stars...")
