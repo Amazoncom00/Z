@@ -3,6 +3,8 @@ import re
 import urllib.parse
 import asyncio
 import time
+import random
+import string
 from datetime import datetime
 from threading import Thread
 from flask import Flask
@@ -40,11 +42,22 @@ def run_flask():
     flask_app.run(host="0.0.0.0", port=port, use_reloader=False)
 
 # ---------------- DATABASE (CHANNEL) HELPERS ---------------- #
-async def sync_user_to_channel(context: ContextTypes.DEFAULT_TYPE, user_id: int, status: str, trial: int, last_report: float = 0.0, refer_code: str = "None", refer_from: str = "None"):
+def generate_unique_referral_code(user_records):
+    while True:
+        code = ''.join(random.choices(string.ascii_uppercase + string.digits, k=7))
+        if not any(r.get("refer_code") == code for r in user_records.values()):
+            return code
+
+async def sync_user_to_channel(context: ContextTypes.DEFAULT_TYPE, user_id: int, status: str, trial: int, last_report: float = 0.0, refer_code: str = "None", refer_from: str = "None", reward_given: str = "False"):
     """Writes or edits the user's data in the Telegram Channel."""
     user_records = context.bot_data.setdefault("user_records", {})
+    
+    if refer_code == "None":
+        refer_code = generate_unique_referral_code(user_records)
+        
     text = (f"Userid: {user_id}\nStatus: {status}\nTrial: {trial}\n"
-            f"LastReport: {last_report}\nReferCode: {refer_code}\nReferFrom: {refer_from}")
+            f"LastReport: {last_report}\nReferCode: {refer_code}\n"
+            f"ReferFrom: {refer_from}\nRewardGiven: {reward_given}")
     
     if user_id in user_records and "msg_id" in user_records[user_id]:
         msg_id = user_records[user_id]["msg_id"]
@@ -52,15 +65,15 @@ async def sync_user_to_channel(context: ContextTypes.DEFAULT_TYPE, user_id: int,
             await context.bot.edit_message_text(chat_id=DB_CHANNEL_ID, message_id=msg_id, text=text)
         except Exception:
             pass 
-        user_records[user_id] = {"msg_id": msg_id, "status": status, "trial": trial, "last_report": last_report, "refer_code": refer_code, "refer_from": refer_from}
+        user_records[user_id] = {"msg_id": msg_id, "status": status, "trial": trial, "last_report": last_report, "refer_code": refer_code, "refer_from": refer_from, "reward_given": reward_given}
     else:
         try:
             msg = await context.bot.send_message(chat_id=DB_CHANNEL_ID, text=text)
-            user_records[user_id] = {"msg_id": msg.message_id, "status": status, "trial": trial, "last_report": last_report, "refer_code": refer_code, "refer_from": refer_from}
+            user_records[user_id] = {"msg_id": msg.message_id, "status": status, "trial": trial, "last_report": last_report, "refer_code": refer_code, "refer_from": refer_from, "reward_given": reward_given}
         except Exception as e:
             print(f"Failed to post to DB Channel: {e}")
 
-async def track_and_check_user(update: Update, context: ContextTypes.DEFAULT_TYPE, ref_code: str = None) -> bool:
+async def track_and_check_user(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
     """Checks if a user is valid. Creates a DB entry for new users. Returns True if BLOCKED."""
     user_id = update.effective_user.id
     if user_id == ADMIN_ID:
@@ -70,18 +83,7 @@ async def track_and_check_user(update: Update, context: ContextTypes.DEFAULT_TYP
     
     # If New User, add them to Database Channel
     if user_id not in user_records:
-        start_trial = 0
-        refer_from = "None"
-        
-        # Process Referral Code
-        if ref_code:
-            for uid, rec in user_records.items():
-                if rec.get("refer_code") == ref_code and rec.get("refer_code") != "None":
-                    start_trial = 2
-                    refer_from = str(uid)
-                    break
-                    
-        await sync_user_to_channel(context, user_id, "Active", start_trial, 0.0, "None", refer_from)
+        await sync_user_to_channel(context, user_id, "Active", 0) # 0 Trials default
         return False
         
     # Check if Blocked
@@ -97,7 +99,6 @@ async def channel_db_sync_handler(update: Update, context: ContextTypes.DEFAULT_
     if not post or post.chat_id != DB_CHANNEL_ID:
         return
 
-    # Cache Media based on tags and detect type dynamically
     caption = post.caption or post.text or ""
     tags = ["Logo", "TutorialVideo", "ProductLink", "AccountNumber"]
     for tag in tags:
@@ -112,9 +113,9 @@ async def channel_db_sync_handler(update: Update, context: ContextTypes.DEFAULT_
                 context.bot_data[f"media_{tag}"] = post.document.file_id
                 context.bot_data[f"media_{tag}_type"] = "document"
 
-    # Sync User Edits: Extract format
+    # Sync User Edits based on new regex format
     if post.text:
-        match = re.search(r"Userid:\s*(\d+)\s*Status:\s*(\w+)\s*Trial:\s*(\d+)(?:\s*LastReport:\s*([\d\.]+))?(?:\s*ReferCode:\s*(\w+))?(?:\s*ReferFrom:\s*([\w]+))?", post.text, re.IGNORECASE)
+        match = re.search(r"Userid:\s*(\d+)\s*Status:\s*(\w+)\s*Trial:\s*(\d+)(?:\s*LastReport:\s*([\d\.]+))?(?:\s*ReferCode:\s*(\w+))?(?:\s*ReferFrom:\s*([\w]+))?(?:\s*RewardGiven:\s*(\w+))?", post.text, re.IGNORECASE)
         if match:
             user_id = int(match.group(1))
             status = match.group(2).capitalize()
@@ -122,9 +123,10 @@ async def channel_db_sync_handler(update: Update, context: ContextTypes.DEFAULT_
             last_report = float(match.group(4)) if match.group(4) else 0.0
             refer_code = match.group(5) if match.group(5) else "None"
             refer_from = match.group(6) if match.group(6) else "None"
+            reward_given = match.group(7).capitalize() if match.group(7) else "False"
             
             user_records = context.bot_data.setdefault("user_records", {})
-            user_records[user_id] = {"msg_id": post.message_id, "status": status, "trial": trial, "last_report": last_report, "refer_code": refer_code, "refer_from": refer_from}
+            user_records[user_id] = {"msg_id": post.message_id, "status": status, "trial": trial, "last_report": last_report, "refer_code": refer_code, "refer_from": refer_from, "reward_given": reward_given}
 
 # ---------------- DYNAMIC MEDIA SENDER ---------------- #
 async def send_dynamic_media(context, chat_id, tag, caption=None, reply_markup=None):
@@ -177,10 +179,7 @@ async def update_countdown_message(context: ContextTypes.DEFAULT_TYPE):
 
 # ---------------- COMMAND HANDLERS ---------------- #
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    args = context.args
-    ref_code = args[0] if args else None
-    
-    if await track_and_check_user(update, context, ref_code): return
+    if await track_and_check_user(update, context): return
     
     user = update.effective_user
     context.user_data["state"] = None
@@ -189,7 +188,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     welcome_text = f"Hello <b>{full_name}</b> 👋🏻\nWelcome To @XDiscount_bot"
     keyboard = InlineKeyboardMarkup([
         [InlineKeyboardButton("About us", callback_data="about_us"), InlineKeyboardButton("Terms", callback_data="terms")],
-        [InlineKeyboardButton("🍁Start", callback_data="start_main")]
+        [InlineKeyboardButton("🍁 Start", callback_data="start_main")]
     ])
     await update.message.reply_text(welcome_text, parse_mode="HTML", reply_markup=keyboard)
 
@@ -200,7 +199,7 @@ async def unblock_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         user_records = context.bot_data.get("user_records", {})
         if target_id in user_records:
             rec = user_records[target_id]
-            await sync_user_to_channel(context, target_id, "Active", rec.get("trial", 0), rec.get("last_report", 0.0), rec.get("refer_code", "None"), rec.get("refer_from", "None"))
+            await sync_user_to_channel(context, target_id, "Active", rec.get("trial", 0), rec.get("last_report", 0.0), rec.get("refer_code", "None"), rec.get("refer_from", "None"), rec.get("reward_given", "False"))
             await update.message.reply_text(f"✅ User {target_id} unblocked.")
         else:
             await update.message.reply_text("❌ User not found.")
@@ -220,50 +219,41 @@ async def go_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ---------------- TELEGRAM STARS PAYMENT HANDLERS ---------------- #
 async def precheckout_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Answers the PreCheckoutQuery for Telegram Stars"""
     await update.pre_checkout_query.answer(ok=True)
 
 async def successful_payment_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handles logic after user successfully pays via Telegram Stars"""
     user_id = update.effective_user.id
     payload = update.message.successful_payment.invoice_payload
     user_records = context.bot_data.get("user_records", {})
     rec = user_records.get(user_id, {})
     
     trials = rec.get("trial", 0)
-    status = rec.get("status", "Active")
-    last_rep = rec.get("last_report", 0.0)
-    refer_code = rec.get("refer_code", "None")
     refer_from = rec.get("refer_from", "None")
+    reward_given = rec.get("reward_given", "False")
 
-    reward_referrer = False
-
-    if payload == "buy_1_discount":
-        trials += 1
-        await update.message.reply_text("🎉 Payment Successful! You have received 1 Discount Coupon.")
-        reward_referrer = True
-    elif payload == "buy_3_discounts":
-        trials += 3
-        await update.message.reply_text("🎉 Payment Successful! You have received 3 Discount Coupons.")
-        reward_referrer = True
-    elif payload == "buy_ref_code":
-        refer_code = f"REF{user_id}"
-        ref_link = f"https://t.me/{context.bot.username}?start={refer_code}"
-        await update.message.reply_text(f"🎉 Payment Successful! Your Referral Link is ready:\n\n{ref_link}\n\nShare this with friends! If they use it and make a purchase, you get 1 Free Discount Coupon!")
-
-    await sync_user_to_channel(context, user_id, status, trials, last_rep, refer_code, refer_from)
-
-    # Reward the referrer if a pack was bought
-    if reward_referrer and refer_from != "None":
+    added = 0
+    if payload == "buy_pack_1": added = 1
+    elif payload == "buy_pack_2": added = 2
+    elif payload == "buy_pack_4": added = 4
+    elif payload == "buy_pack_8": added = 8
+        
+    trials += added
+    await update.message.reply_text(f"🎉 Payment Successful! You have received {added} Discount Coupon(s).")
+    
+    # Process First-Time Purchase Referral Reward
+    if refer_from != "None" and reward_given == "False":
+        reward_given = "True"
         try:
             ref_id = int(refer_from)
             ref_rec = user_records.get(ref_id)
             if ref_rec:
                 r_trials = ref_rec.get("trial", 0) + 1
-                await sync_user_to_channel(context, ref_id, ref_rec.get("status", "Active"), r_trials, ref_rec.get("last_report", 0.0), ref_rec.get("refer_code", "None"), ref_rec.get("refer_from", "None"))
-                await context.bot.send_message(chat_id=ref_id, text="🎁 <b>Bonus!</b>\nSomeone you referred just made a purchase! You have been rewarded with +1 Free Discount Coupon!", parse_mode="HTML")
+                await sync_user_to_channel(context, ref_id, ref_rec.get("status", "Active"), r_trials, ref_rec.get("last_report", 0.0), ref_rec.get("refer_code", "None"), ref_rec.get("refer_from", "None"), ref_rec.get("reward_given", "False"))
+                await context.bot.send_message(chat_id=ref_id, text="🎁 <b>Bonus!</b>\nSomeone you referred just made their first purchase! You have been rewarded with +1 Free Trial Coupon!", parse_mode="HTML")
         except Exception:
             pass
+
+    await sync_user_to_channel(context, user_id, rec.get("status", "Active"), trials, rec.get("last_report", 0.0), rec.get("refer_code", "None"), refer_from, reward_given)
 
 # ---------------- CALLBACK QUERY HANDLER ---------------- #
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -276,7 +266,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_records = context.bot_data.get("user_records", {})
     chat_id = query.message.chat_id
 
-    # -- ADMIN /GO MENU --
+    # -- ADMIN /GO MENU -- (Skipped detailed code for brevity as it remains identical to previous)
     if data == "adm_menu_announcement":
         admin_sessions[ADMIN_ID] = {"step": "WAITING_ANNOUNCEMENT"}
         await query.message.edit_text("Write Announcement Message (You can attach image or video):")
@@ -298,7 +288,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif data == "adm_menu_end_all_confirm":
         for u_id, rec in list(user_records.items()):
             if u_id != ADMIN_ID:
-                await sync_user_to_channel(context, u_id, "Blocked", rec.get("trial", 0), rec.get("last_report", 0.0), rec.get("refer_code", "None"), rec.get("refer_from", "None"))
+                await sync_user_to_channel(context, u_id, "Blocked", rec.get("trial", 0), rec.get("last_report", 0.0), rec.get("refer_code", "None"), rec.get("refer_from", "None"), rec.get("reward_given", "False"))
                 await asyncio.sleep(0.05)
         await query.message.edit_text("✅ All users blocked.")
     elif data == "adm_menu_close":
@@ -312,7 +302,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         welcome_text = f"Hello <b>{full_name}</b> 👋🏻\nWelcome To @XDiscount_bot"
         keyboard = InlineKeyboardMarkup([
             [InlineKeyboardButton("About us", callback_data="about_us"), InlineKeyboardButton("Terms", callback_data="terms")],
-            [InlineKeyboardButton("🍁Start", callback_data="start_main")]
+            [InlineKeyboardButton("🍁 Start", callback_data="start_main")]
         ])
         try: await query.message.delete()
         except: pass
@@ -370,7 +360,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("Continue", callback_data="report_continue"), InlineKeyboardButton("Back", callback_data="terms")]])
         try: await query.message.delete()
         except: pass
-        await context.bot.send_message(chat_id=chat_id, text="⚠️ Notice: You can send 1 report in a week. Please continue carefully.", reply_markup=keyboard)
+        await context.bot.send_message(chat_id=chat_id, text="⚠️ Notice: You can send 1 report per week. Please continue carefully.", reply_markup=keyboard)
 
     elif data == "report_continue":
         last_rep = user_records.get(user.id, {}).get("last_report", 0.0)
@@ -389,7 +379,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     elif data == "start_main":
         trials_left = user_records.get(user.id, {}).get("trial", 0)
-        
         try: await query.message.delete()
         except: pass
 
@@ -404,46 +393,64 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         try: await query.message.delete()
         except: pass
         
-        refer_code = user_records.get(user.id, {}).get("refer_code", "None")
+        refer_from = user_records.get(user.id, {}).get("refer_from", "None")
         
         buttons = [
             [InlineKeyboardButton("1 Discount (500 ⭐️)", callback_data="buy_pack_1")],
-            [InlineKeyboardButton("3 Discounts (1000 ⭐️)", callback_data="buy_pack_3")]
+            [InlineKeyboardButton("2 Discounts (999 ⭐️)", callback_data="buy_pack_2")],
+            [InlineKeyboardButton("4 Discounts (1400 ⭐️)", callback_data="buy_pack_4")],
+            [InlineKeyboardButton("8 Discounts (3000 ⭐️)", callback_data="buy_pack_8")],
         ]
         
-        if refer_code == "None":
-            buttons.append([InlineKeyboardButton("Generate Referral Code (500 ⭐️)", callback_data="buy_ref")])
+        if refer_from == "None":
+            buttons.append([InlineKeyboardButton("Enter Referral Code", callback_data="enter_referral")])
             
+        buttons.append([InlineKeyboardButton("My Referral Code", callback_data="my_referral")])
         buttons.append([InlineKeyboardButton("Back", callback_data="start_main")])
         
-        text = "Purchase Discount Coupons using Telegram Stars!\n\n<i>Note: Generating a Referral Code allows you to invite friends. When they purchase a discount pack, you earn a free discount automatically!</i>"
+        text = ("🛒 <b>Discount Store</b>\n\n"
+                "Purchase Discount Coupons using Telegram Stars!\n\n"
+                "💡 <b>Referral Program:</b>\n"
+                "Check 'My Referral Code' to invite friends. When someone enters your code, they get 1 free trial. When they make their first purchase, you automatically receive 1 free trial as a gift!")
         
         await context.bot.send_message(chat_id=chat_id, text=text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(buttons))
 
-    elif data.startswith("buy_pack_") or data == "buy_ref":
+    elif data == "enter_referral":
+        context.user_data["state"] = "WAITING_REFERRAL_CODE"
+        try: await query.message.delete()
+        except: pass
+        kb = InlineKeyboardMarkup([[InlineKeyboardButton("Cancel", callback_data="purchase_menu")]])
+        await context.bot.send_message(chat_id=chat_id, text="Please send the Referral Code you received from your friend:", reply_markup=kb)
+
+    elif data == "my_referral":
+        # Generate on the fly if needed
+        rec = user_records.get(user.id, {})
+        code = rec.get("refer_code", "None")
+        if code == "None":
+            code = generate_unique_referral_code(user_records)
+            await sync_user_to_channel(context, user.id, rec.get("status", "Active"), rec.get("trial", 0), rec.get("last_report", 0.0), code, rec.get("refer_from", "None"), rec.get("reward_given", "False"))
+        
+        text = (f"🎁 <b>Your Unique Referral Code:</b>\n\n<code>{code}</code>\n\n"
+                "Share this code with your friends! If they use it in the bot, they get 1 free trial. If they purchase any discount pack, you get 1 free trial as a gift!")
+        kb = InlineKeyboardMarkup([[InlineKeyboardButton("Back", callback_data="purchase_menu")]])
+        try: await query.message.delete()
+        except: pass
+        await context.bot.send_message(chat_id=chat_id, text=text, parse_mode="HTML", reply_markup=kb)
+
+    elif data.startswith("buy_pack_"):
         try: await query.message.delete()
         except: pass
         
-        title = ""
-        description = ""
-        payload = ""
-        price_amount = 0
+        title, description, payload, price_amount = "", "", "", 0
         
         if data == "buy_pack_1":
-            title = "1 Discount Coupon"
-            description = "Get 1 Free Discount Trial"
-            payload = "buy_1_discount"
-            price_amount = 500
-        elif data == "buy_pack_3":
-            title = "3 Discount Coupons"
-            description = "Get 3 Free Discount Trials"
-            payload = "buy_3_discounts"
-            price_amount = 1000
-        elif data == "buy_ref":
-            title = "Referral Code Generator"
-            description = "Generate your unique Referral Code to earn bonuses!"
-            payload = "buy_ref_code"
-            price_amount = 500
+            title, description, payload, price_amount = "1 Discount Coupon", "Get 1 Free Discount Trial", "buy_pack_1", 500
+        elif data == "buy_pack_2":
+            title, description, payload, price_amount = "2 Discount Coupons", "Get 2 Free Discount Trials", "buy_pack_2", 999
+        elif data == "buy_pack_4":
+            title, description, payload, price_amount = "4 Discount Coupons", "Get 4 Free Discount Trials", "buy_pack_4", 1400
+        elif data == "buy_pack_8":
+            title, description, payload, price_amount = "8 Discount Coupons", "Get 8 Free Discount Trials", "buy_pack_8", 3000
 
         prices = [LabeledPrice(title, price_amount)]
         
@@ -474,25 +481,24 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         context.user_data["state"] = "WAITING_FLIPKART_LINK"
         kb = InlineKeyboardMarkup([[InlineKeyboardButton("Tutorial", callback_data="tutorial")]])
-        text = "Send Your Product Link, Product Must be Electronic and without Discount, Price must be ₹50,000."
+        text = "Send Your Product Link. The Product Must be Electronic and the price (without discount) must be at least ₹50,000."
         try: await query.message.delete()
         except: pass
         await send_dynamic_media(context, chat_id, "ProductLink", text, kb)
 
     elif data == "edit_details":
-        # Loop back to link state
         context.user_data["state"] = "WAITING_FLIPKART_LINK"
         try: await query.message.delete()
         except: pass
         await context.bot.send_message(chat_id=chat_id, text="Send Your Product Link again:")
 
     elif data == "continue_submit":
-        trials_left = user_records.get(user.id, {}).get("trial", 0)
         rec = user_records.get(user.id, {})
+        trials_left = rec.get("trial", 0)
         
         # Deduct Trial
         new_trial_count = max(0, trials_left - 1)
-        await sync_user_to_channel(context, user.id, rec.get("status", "Active"), new_trial_count, rec.get("last_report", 0.0), rec.get("refer_code", "None"), rec.get("refer_from", "None"))
+        await sync_user_to_channel(context, user.id, rec.get("status", "Active"), new_trial_count, rec.get("last_report", 0.0), rec.get("refer_code", "None"), rec.get("refer_from", "None"), rec.get("reward_given", "False"))
 
         try: await query.message.delete()
         except: pass
@@ -557,7 +563,40 @@ async def media_and_text_handler(update: Update, context: ContextTypes.DEFAULT_T
     user_id = update.effective_user.id
     user_records = context.bot_data.get("user_records", {})
     state = context.user_data.get("state")
+    text = update.message.text.strip() if update.message.text else update.message.caption.strip() if update.message.caption else ""
     
+    # Handle Referral Code Submission
+    if state == "WAITING_REFERRAL_CODE":
+        if text.startswith("/"):
+            context.user_data["state"] = None
+            return # Let command handler take over
+
+        code = text.upper()
+        referrer_uid = None
+        for uid, rec in user_records.items():
+            if rec.get("refer_code") == code and rec.get("refer_code") != "None":
+                referrer_uid = uid
+                break
+                
+        if not referrer_uid:
+            kb = InlineKeyboardMarkup([[InlineKeyboardButton("Cancel", callback_data="purchase_menu")]])
+            await update.message.reply_text("❌ Invalid Referral Code. Please check the code and try again.", reply_markup=kb)
+            return
+            
+        if referrer_uid == user_id:
+            context.user_data["state"] = None
+            await update.message.reply_text("❌ You cannot use your own Referral Code!")
+            return
+            
+        # Give current user +1 Trial, update ReferFrom
+        current_rec = user_records.get(user_id, {})
+        new_trials = current_rec.get("trial", 0) + 1
+        await sync_user_to_channel(context, user_id, current_rec.get("status", "Active"), new_trials, current_rec.get("last_report", 0.0), current_rec.get("refer_code", "None"), str(referrer_uid), current_rec.get("reward_given", "False"))
+        
+        context.user_data["state"] = None
+        await update.message.reply_text("✅ Referral Code accepted! You have received 1 Free Discount Trial.")
+        return
+
     # Handle Voice Report Submissions
     if state == "WAITING_VOICE_REPORT":
         if not update.message.voice:
@@ -567,11 +606,9 @@ async def media_and_text_handler(update: Update, context: ContextTypes.DEFAULT_T
             await update.message.reply_text("❌ Voice note must be around 30 seconds or less. Try again.")
             return
             
-        # Update Report timestamp in DB
         rec = user_records.get(user_id, {})
-        await sync_user_to_channel(context, user_id, rec.get("status", "Active"), rec.get("trial", 0), time.time(), rec.get("refer_code", "None"), rec.get("refer_from", "None"))
+        await sync_user_to_channel(context, user_id, rec.get("status", "Active"), rec.get("trial", 0), time.time(), rec.get("refer_code", "None"), rec.get("refer_from", "None"), rec.get("reward_given", "False"))
         
-        # Forward to admin
         await context.bot.send_message(chat_id=ADMIN_ID, text=f"⚠️ <b>New Issue Report from <code>{user_id}</code></b>", parse_mode="HTML")
         await update.message.copy(chat_id=ADMIN_ID)
         
@@ -579,8 +616,6 @@ async def media_and_text_handler(update: Update, context: ContextTypes.DEFAULT_T
         await update.message.reply_text("Within 24 hours, our team member will contact you.", reply_markup=kb)
         context.user_data["state"] = None
         return
-
-    text = update.message.text.strip() if update.message.text else update.message.caption.strip() if update.message.caption else ""
 
     # --- ADMIN WORKFLOW ENGINE ---
     if user_id == ADMIN_ID and user_id in admin_sessions:
@@ -672,7 +707,7 @@ async def media_and_text_handler(update: Update, context: ContextTypes.DEFAULT_T
                 t_id = int(text)
                 if t_id in user_records:
                     rec = user_records[t_id]
-                    await sync_user_to_channel(context, t_id, "Blocked", rec.get("trial", 0), rec.get("last_report", 0.0), rec.get("refer_code", "None"), rec.get("refer_from", "None"))
+                    await sync_user_to_channel(context, t_id, "Blocked", rec.get("trial", 0), rec.get("last_report", 0.0), rec.get("refer_code", "None"), rec.get("refer_from", "None"), rec.get("reward_given", "False"))
                     await update.message.reply_text(f"✅ User {t_id} has been blocked and database updated.")
                 else:
                     await update.message.reply_text("❌ User not found in database.")
@@ -730,10 +765,10 @@ async def media_and_text_handler(update: Update, context: ContextTypes.DEFAULT_T
             await update.message.reply_text("❌ Invalid Link. Please send a valid Flipkart link.")
 
     elif state == "WAITING_MOBILE_NUMBER" and text:
-        # Expect 10 digit number with or without +91
+        # Expect 10 digit number
         number_only = re.sub(r'\D', '', text)
         if len(number_only) >= 10:
-            mobile_num = number_only[-10:] # get last 10 digits
+            mobile_num = number_only[-10:]
             context.user_data["mobile_num"] = mobile_num
             context.user_data["state"] = None
             
@@ -757,13 +792,11 @@ def main():
         print("WARNING: TELEGRAM_TOKEN environment variable is missing!")
         return
 
-    # Keep alive for Heroku/Render
     Thread(target=run_flask, daemon=True).start()
 
     persistence = PicklePersistence(filepath="bot_state.pkl")
     app = Application.builder().token(BOT_TOKEN).persistence(persistence).build()
 
-    # Core Handlers
     app.add_handler(CommandHandler("start", start_command))
     app.add_handler(CommandHandler("Go", go_command))
     app.add_handler(CommandHandler("unblock", unblock_command))
@@ -776,12 +809,11 @@ def main():
     # Text, Photos, Videos, Voice
     app.add_handler(MessageHandler(filters.ChatType.PRIVATE & ~filters.COMMAND, media_and_text_handler))
     
-    # 2-WAY DB SYNC: Listens to the Database channel for manual Admin edits and Media Tags
+    # 2-WAY DB SYNC
     app.add_handler(MessageHandler(filters.ChatType.CHANNEL, channel_db_sync_handler))
 
     print("Bot is running 24/7 with Channel Backend Database & Telegram Stars...")
     app.run_polling()
-
 
 if __name__ == "__main__":
     main()
