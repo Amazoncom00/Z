@@ -48,10 +48,24 @@ def generate_unique_referral_code(user_records):
         if not any(r.get("refer_code") == code for r in user_records.values()):
             return code
 
+def format_inr(number_str: str) -> str:
+    """Formats 79812 into ₹79,812"""
+    num = re.sub(r'\D', '', number_str)
+    if not num: 
+        return f"₹{number_str}"
+    if len(num) <= 3: 
+        return f"₹{num}"
+    last_three = num[-3:]
+    rest = num[:-3]
+    chunks = []
+    while rest:
+        chunks.append(rest[-2:])
+        rest = rest[:-2]
+    chunks.reverse()
+    return f"₹{','.join(chunks)},{last_three}"
+
 async def sync_user_to_channel(context: ContextTypes.DEFAULT_TYPE, user_id: int, status: str, trial: int, last_report: float = 0.0, refer_code: str = "None", refer_from: str = "None", reward_given: str = "False"):
-    """Writes or edits the user's data in the Telegram Channel."""
     user_records = context.bot_data.setdefault("user_records", {})
-        
     text = (f"Userid: {user_id}\nStatus: {status}\nTrial: {trial}\n"
             f"LastReport: {last_report}\nReferCode: {refer_code}\n"
             f"ReferFrom: {refer_from}\nRewardGiven: {reward_given}")
@@ -71,25 +85,21 @@ async def sync_user_to_channel(context: ContextTypes.DEFAULT_TYPE, user_id: int,
             print(f"Failed to post to DB Channel: {e}")
 
 async def track_and_check_user(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
-    """Checks if a user is valid. Creates a DB entry for new users. Returns True if BLOCKED."""
     user_id = update.effective_user.id
     if user_id == ADMIN_ID:
         return False
         
     user_records = context.bot_data.setdefault("user_records", {})
-    
     if user_id not in user_records:
         await sync_user_to_channel(context, user_id, "Active", 0) 
         return False
         
     if user_records[user_id].get("status", "Active").lower() == "blocked":
         return True
-        
     return False
 
 # ---------------- CHANNEL 2-WAY SYNC HANDLER ---------------- #
 async def channel_db_sync_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Listens for Admin manual edits inside the Database channel and media tags."""
     post = update.channel_post or update.edited_channel_post
     if not post or post.chat_id != DB_CHANNEL_ID:
         return
@@ -164,7 +174,6 @@ async def update_countdown_message(context: ContextTypes.DEFAULT_TYPE):
         except: pass
         job.schedule_removal()
         return
-        
     diff = job.data["end_time"] - now
     h, rem = divmod(diff.seconds, 3600)
     m, s = divmod(rem, 60)
@@ -172,7 +181,6 @@ async def update_countdown_message(context: ContextTypes.DEFAULT_TYPE):
     text = f"⏳ <b>Live Countdown: {job.data['name']}</b>\n\nEnds in: <b>{t_str}</b>"
     try: await context.bot.edit_message_text(chat_id=job.chat_id, message_id=job.data["msg_id"], text=text, parse_mode="HTML")
     except: pass
-
 
 # ---------------- COMMAND HANDLERS ---------------- #
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -421,9 +429,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif data.startswith("buy_pack_"):
         try: await query.message.delete()
         except: pass
-        
         title, description, payload, price_amount = "", "", "", 0
-        
         if data == "buy_pack_1":
             title, description, payload, price_amount = "1 Discount link", "Get 1 Free Discount link", "buy_pack_1", 500
         elif data == "buy_pack_2":
@@ -432,18 +438,8 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             title, description, payload, price_amount = "4 Discount links", "Get 4 Free Discount links", "buy_pack_4", 1400
         elif data == "buy_pack_8":
             title, description, payload, price_amount = "8 Discount links", "Get 8 Free Discount links + Unlocks Referral Code", "buy_pack_8", 3000
-
         prices = [LabeledPrice(title, price_amount)]
-        
-        await context.bot.send_invoice(
-            chat_id=chat_id,
-            title=title,
-            description=description,
-            payload=payload,
-            provider_token="", # Empty for Telegram Stars
-            currency="XTR",
-            prices=prices
-        )
+        await context.bot.send_invoice(chat_id=chat_id, title=title, description=description, payload=payload, provider_token="", currency="XTR", prices=prices)
 
     # -- TUTORIAL FLOW --
     elif data in ["tutorial_eng", "tutorial_hin"]:
@@ -451,11 +447,8 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         other_btn = "Hindi Tutorial" if data == "tutorial_eng" else "English Tutorial"
         other_call = "tutorial_hin" if data == "tutorial_eng" else "tutorial_eng"
         
-        # Decide back destination based on state
-        back_dest = "user_ok_ready" if context.user_data.get("is_in_ready_flow") else "start_main"
-        if back_dest == "start_main":
-            context.user_data["state"] = "WAITING_FLIPKART_LINK"
-            back_dest = "direct_start" # Replace back with Direct Start as requested before
+        # Decide back destination
+        back_dest = "resend_qualified_msg" if context.user_data.get("is_in_ready_flow") else "direct_start"
 
         kb = InlineKeyboardMarkup([
             [InlineKeyboardButton(other_btn, callback_data=other_call)],
@@ -492,7 +485,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         rec = user_records.get(user.id, {})
         trials_left = rec.get("trial", 0)
         
-        # Deduct Trial
         new_trial_count = max(0, trials_left - 1)
         await sync_user_to_channel(context, user.id, rec.get("status", "Active"), new_trial_count, rec.get("last_report", 0.0), rec.get("refer_code", "None"), rec.get("refer_from", "None"), rec.get("reward_given", "False"))
 
@@ -510,6 +502,16 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("Accept", callback_data=f"adm_accept_{user.id}"), InlineKeyboardButton("Reject", callback_data=f"adm_reject_{user.id}")]])
         await context.bot.send_message(chat_id=ADMIN_ID, text=admin_message, parse_mode="HTML", reply_markup=keyboard)
 
+    # -- SPECIAL OFFER BUTTON --
+    elif data == "sp_offer_grab":
+        try: await query.message.delete()
+        except: pass
+        await context.bot.send_message(chat_id=chat_id, text="Turn on bot notification. We will send you the Discount Redirect.\nThank you for using X DISCOUNT.")
+        full_name = f"{user.first_name} {user.last_name or ''}".strip()
+        admin_message = f"🎁 <b>[Special Offer]</b>\n1. <b><code>{user.id}</code></b>\n2. {full_name}"
+        keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("Accept", callback_data=f"adm_accept_{user.id}"), InlineKeyboardButton("Reject", callback_data=f"adm_sp_reject_{user.id}")]])
+        await context.bot.send_message(chat_id=ADMIN_ID, text=admin_message, parse_mode="HTML", reply_markup=keyboard)
+
     # -- ADMIN REVIEW CALLS --
     elif data.startswith("adm_reject_"):
         target_id = int(data.split("adm_reject_")[1])
@@ -523,43 +525,34 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     elif data.startswith("adm_accept_"):
         target_id = int(data.split("adm_accept_")[1])
-        
-        # 1. Start Admin Session
+        # Start Session silently, user gets nothing until step 4 finishes.
         admin_sessions[ADMIN_ID] = {"target_user_id": target_id, "step": "WAITING_HYPER_LINK", "data": {}}
         await query.message.edit_text(f"✅ Accepted User {target_id}.\nPlease send the Hyper Link:")
-        
-        # 2. Instantly notify User
-        kb = InlineKeyboardMarkup([[InlineKeyboardButton("Ok", callback_data="user_ok_ready")]])
-        text = "🎉 <b>Congratulations!</b>\nYour link is qualified for a discount. Please wait a minute for your Discount Link."
-        await send_dynamic_media(context, target_id, "Ready", text, kb)
 
-    # -- NEW USER WORKFLOW (POST-APPROVAL) --
-    elif data == "user_ok_ready":
-        context.user_data["is_in_ready_flow"] = True
+    # -- POST-APPROVAL WORKFLOW FOR USER --
+    elif data == "resend_qualified_msg":
         try: await query.message.delete()
         except: pass
         kb = InlineKeyboardMarkup([
-            [InlineKeyboardButton("Watched", callback_data="user_watched_ready"), InlineKeyboardButton("Tutorial", callback_data="tutorial_eng")]
+            [InlineKeyboardButton("Continue", callback_data="user_continue_ready"), InlineKeyboardButton("Tutorial", callback_data="tutorial_eng")]
         ])
-        await context.bot.send_message(chat_id=chat_id, text="⚠️ <b>Warning</b>\nPlease watch the tutorial before continuing.", parse_mode="HTML", reply_markup=kb)
+        msg_text = "🎉 <b>Congratulations!</b>\nYour link is qualified for a discount."
+        await send_dynamic_media(context, chat_id, "Ready", msg_text, kb)
 
-    elif data == "user_watched_ready":
-        is_ready = context.user_data.get("admin_discount_ready", False)
-        if not is_ready:
-            await query.answer("⏳ Generating your link... please wait.", show_alert=True)
-            return
-            
+    elif data == "user_continue_ready":
         try: await query.message.delete()
         except: pass
-        
         d_data = context.user_data.get("final_discount_data", {})
+        if not d_data:
+            await context.bot.send_message(chat_id=chat_id, text="Data fetch error. Please contact support.")
+            return
+
         text = (f"🎉 You got <b>{d_data.get('discount')}</b> on <b>{d_data.get('product_name')}</b>.\n"
                 f"You can purchase this product for <b>{d_data.get('final_price')}</b>.")
         
         kb = InlineKeyboardMarkup([[InlineKeyboardButton("🔴 Buy Now 🔴", url=d_data.get('hyper_link'))]])
         await context.bot.send_message(chat_id=chat_id, text=text, parse_mode="HTML", reply_markup=kb)
         context.user_data["is_in_ready_flow"] = False
-        context.user_data["admin_discount_ready"] = False # Reset for future
 
 
 # ---------------- TEXT & MEDIA HANDLER ---------------- #
@@ -609,7 +602,6 @@ async def media_and_text_handler(update: Update, context: ContextTypes.DEFAULT_T
             await update.message.reply_text("❌ You have already used a Referral Code before!")
             return
             
-        # Give current user +1 Trial, update ReferFrom
         new_trials = current_rec.get("trial", 0) + 1
         await sync_user_to_channel(context, user_id, current_rec.get("status", "Active"), new_trials, current_rec.get("last_report", 0.0), current_rec.get("refer_code", "None"), str(referrer_uid), "False")
         
@@ -754,19 +746,26 @@ async def media_and_text_handler(update: Update, context: ContextTypes.DEFAULT_T
             data = session["data"]
             del admin_sessions[user_id]
             
+            final_price_fmt = format_inr(text)
+
             target_data = context.application.user_data.setdefault(target_id, {})
             target_data["final_discount_data"] = {
                 "hyper_link": data["hyper_link"],
                 "discount": data["discount"],
                 "product_name": data["product_name"],
-                "final_price": text
+                "final_price": final_price_fmt
             }
-            target_data["admin_discount_ready"] = True
+            target_data["is_in_ready_flow"] = True
             
-            # Notify user it's ready
-            kb = InlineKeyboardMarkup([[InlineKeyboardButton("View Discount Link", callback_data="user_watched_ready")]])
-            await context.bot.send_message(chat_id=target_id, text="✅ <b>Your Discount Link is successfully generated!</b>\nTap the button below to view it.", parse_mode="HTML", reply_markup=kb)
-            await update.message.reply_text(f"✅ Setup Completed! Final link sent to User {target_id}.")
+            # Instantly Notify User 
+            kb = InlineKeyboardMarkup([
+                [InlineKeyboardButton("Continue", callback_data="user_continue_ready"), InlineKeyboardButton("Tutorial", callback_data="tutorial_eng")]
+            ])
+            msg_text = "🎉 <b>Congratulations!</b>\nYour link is qualified for a discount."
+            await send_dynamic_media(context, target_id, "Ready", msg_text, kb)
+            
+            # Acknowledge Admin
+            await update.message.reply_text(f"✅ Setup Completed! Qualified message successfully sent to User {target_id}.")
             return
 
     # --- REGULAR USER WORKFLOWS ---
@@ -785,7 +784,6 @@ async def media_and_text_handler(update: Update, context: ContextTypes.DEFAULT_T
             await update.message.reply_text("❌ Invalid Link. Please send a valid Flipkart link.")
 
     elif state == "WAITING_MOBILE_NUMBER" and text:
-        # Expect 10 digit number
         number_only = re.sub(r'\D', '', text)
         if len(number_only) >= 10:
             mobile_num = number_only[-10:]
