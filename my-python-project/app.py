@@ -311,7 +311,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif data == "main_menu":
         context.user_data["state"] = None
         full_name = f"{user.first_name} {user.last_name or ''}".strip()
-        welcome_text = f"Hello <b>{full_name}</b> 👋🏻\nWelcome To @XDiscount_bot"
+        welcome_text = f"Hello <b>{full_name}</b> 👋🏻\nWelcome To @Rebrandx_bot"
         keyboard = InlineKeyboardMarkup([
             [InlineKeyboardButton("About us", callback_data="about_us"), InlineKeyboardButton("Terms", callback_data="terms")],
             [InlineKeyboardButton("🍁 Start", callback_data="start_main")]
