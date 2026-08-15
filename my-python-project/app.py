@@ -1,8 +1,9 @@
 import os
 import re
+import io
+import json
 import urllib.parse
 import urllib.request
-import json
 import asyncio
 import time
 import random
@@ -28,7 +29,12 @@ ADMIN_ID = 8844584255
 DB_CHANNEL_ID = -1003936910985
 LOGO_URL_FALLBACK = "https://ik.imagekit.io/Rajmalik99/1786595036231.png"
 BOT_TOKEN = os.environ.get("TELEGRAM_TOKEN")
-REBRAND_API_KEY = os.environ.get("Rebrand_Api") or os.environ.get("REBRAND_API")
+REBRAND_API_KEY = (
+    os.environ.get("Rebrand_Api")
+    or os.environ.get("REBRAND_API")
+    or os.environ.get("REBRAND_API_KEY")
+    or os.environ.get("REBRANDLY_API_KEY")
+)
 
 # Global memory for admin workflows
 admin_sessions = {}
@@ -44,10 +50,10 @@ def run_flask():
     port = int(os.environ.get("PORT", 8080))
     flask_app.run(host="0.0.0.0", port=port, use_reloader=False)
 
-# ---------------- HELPERS & SCRAPERS ---------------- #
+# ---------------- HELPERS, SCRAPERS & SHORTENER ---------------- #
 def format_inr(number_str: str) -> str:
     """Formats 79812 into ₹79,812 perfectly."""
-    num = re.sub(r'\D', '', number_str)
+    num = re.sub(r'\D', '', str(number_str))
     if not num: 
         return f"₹{number_str}"
     if len(num) <= 3: 
@@ -69,64 +75,99 @@ def extract_flipkart_link(text: str) -> str:
             return url
     return ""
 
-def fetch_product_metadata(url: str):
-    """Scrapes the Flipkart Product Title and Image URL automatically."""
+def fetch_flipkart_metadata(url: str):
+    """
+    Follows redirects, extracts actual Product Title (from HTML or URL Slug),
+    and downloads product image bytes directly.
+    """
     headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
         "Accept-Language": "en-US,en;q=0.9",
     }
-    title = "Flipkart Qualified Product"
-    image_url = None
-
+    
+    final_url = url
+    html = ""
     try:
         req = urllib.request.Request(url, headers=headers)
-        with urllib.request.urlopen(req, timeout=10) as response:
+        with urllib.request.urlopen(req, timeout=12) as response:
+            final_url = response.geturl()
             html = response.read().decode('utf-8', errors='ignore')
-            
-            # Extract OpenGraph Title / Regular Title
-            og_title = re.search(r'<meta\s+(?:property|name)=["\']og:title["\']\s+content=["\'](.*?)["\']', html, re.IGNORECASE)
-            if not og_title:
-                og_title = re.search(r'<title>(.*?)</title>', html, re.IGNORECASE)
-            
-            if og_title:
-                raw_title = og_title.group(1).strip()
-                # Clean generic Flipkart branding suffixes
-                raw_title = re.sub(r':\s*Buy.*$', '', raw_title, flags=re.IGNORECASE)
-                raw_title = re.sub(r'\|\s*Flipkart.*$', '', raw_title, flags=re.IGNORECASE)
-                raw_title = re.sub(r'-\s*Flipkart.*$', '', raw_title, flags=re.IGNORECASE)
-                if raw_title.strip():
-                    title = raw_title.strip()
-
-            # Extract OpenGraph Image
-            og_image = re.search(r'<meta\s+(?:property|name)=["\']og:image["\']\s+content=["\'](.*?)["\']', html, re.IGNORECASE)
-            if og_image:
-                image_url = og_image.group(1).strip()
     except Exception as e:
-        print(f"Metadata Fetch Error: {e}")
+        print(f"Flipkart Page Request Error: {e}")
 
-    return title, image_url
+    # 1. Extract title from HTML tags
+    extracted_title = ""
+    og_title = re.search(r'<meta\s+(?:property|name)=["\'](?:og:title|twitter:title)["\']\s+content=["\'](.*?)["\']', html, re.IGNORECASE)
+    if og_title:
+        extracted_title = og_title.group(1).strip()
+    
+    if not extracted_title:
+        title_tag = re.search(r'<title>(.*?)</title>', html, re.IGNORECASE)
+        if title_tag:
+            extracted_title = title_tag.group(1).strip()
 
-def create_rebrandly_short_link(destination_url: str, user_mobile: str) -> str:
-    """Shortens the hyper link via Rebrandly with custom back-half / slashtag."""
-    api_key = REBRAND_API_KEY
-    if not api_key:
-        print("⚠️ Rebrand_Api key is not provided in environment variables.")
-        return destination_url
+    # Clean Flipkart branding suffixes
+    if extracted_title:
+        extracted_title = re.sub(r':\s*Buy.*$', '', extracted_title, flags=re.IGNORECASE)
+        extracted_title = re.sub(r'\|\s*Flipkart.*$', '', extracted_title, flags=re.IGNORECASE)
+        extracted_title = re.sub(r'-\s*Flipkart.*$', '', extracted_title, flags=re.IGNORECASE)
+        extracted_title = extracted_title.strip()
 
-    # Generate 8 character random alphanumeric code
-    code_8 = ''.join(random.choices(string.ascii_uppercase + string.digits, k=8))
-    # Rebrandly slashtags support alphanumeric, underscores, hyphens (^[a-zA-Z0-9_-]+$)
-    custom_slashtag = f"Flipkart_{user_mobile}_{code_8}"
+    # 2. If title still generic, extract directly from URL slug (100% accurate on Flipkart URLs)
+    if not extracted_title or "Flipkart" in extracted_title or len(extracted_title) < 4:
+        slug_match = re.search(r'flipkart\.com/(?:dl/)?([^/?#]+)/p/', final_url, re.IGNORECASE)
+        if slug_match:
+            slug = slug_match.group(1)
+            words = slug.split('-')
+            extracted_title = " ".join([w.capitalize() for w in words if w])
+    
+    if not extracted_title:
+        extracted_title = "Flipkart Product"
+
+    # 3. Extract Image URL
+    image_url = None
+    og_image = re.search(r'<meta\s+(?:property|name)=["\'](?:og:image|twitter:image)["\']\s+content=["\'](.*?)["\']', html, re.IGNORECASE)
+    if og_image:
+        image_url = og_image.group(1).strip()
+    
+    if not image_url:
+        ruk_match = re.search(r'(https?://rukminim\d*\.flixcart\.com/image/[^\s"\'>]+)', html)
+        if ruk_match:
+            image_url = ruk_match.group(1).strip()
+
+    # 4. Download raw image bytes so Telegram uploads it directly without CDN blocking
+    image_bytes = None
+    if image_url:
+        try:
+            img_req = urllib.request.Request(image_url, headers=headers)
+            with urllib.request.urlopen(img_req, timeout=10) as img_resp:
+                image_bytes = img_resp.read()
+        except Exception as img_err:
+            print(f"Error downloading image bytes: {img_err}")
+
+    return extracted_title, image_bytes
+
+def create_rebrandly_short_link(destination_url: str, user_mobile: str) -> tuple[bool, str]:
+    """
+    Creates a shortened link on Rebrandly with custom slashtag: Flipkart_UserMobile_RandomCode.
+    Returns (success: bool, result_or_error: str)
+    """
+    if not REBRAND_API_KEY:
+        return False, "Rebrand_Api environment variable is missing!"
+
+    random_code = ''.join(random.choices(string.ascii_uppercase + string.digits, k=8))
+    slashtag = f"Flipkart_{user_mobile}_{random_code}"
 
     endpoint = "https://api.rebrandly.com/v1/links"
     headers = {
         "Content-Type": "application/json",
-        "apikey": api_key.strip()
+        "apikey": REBRAND_API_KEY.strip()
     }
     payload = {
         "destination": destination_url,
-        "slashtag": custom_slashtag,
-        "title": f"Flipkart-{user_mobile}"
+        "slashtag": slashtag,
+        "title": f"Flipkart Order {user_mobile}"
     }
 
     try:
@@ -135,22 +176,26 @@ def create_rebrandly_short_link(destination_url: str, user_mobile: str) -> str:
             data = json.loads(resp.read().decode('utf-8'))
             short_url = data.get("shortUrl")
             if short_url:
-                return f"https://{short_url}" if not short_url.startswith("http") else short_url
-    except Exception as e:
-        print(f"Rebrandly Custom Slashtag failed ({e}), attempting fallback auto-generation...")
+                final_short = f"https://{short_url}" if not short_url.startswith("http") else short_url
+                return True, final_short
+    except urllib.error.HTTPError as e:
+        err_msg = e.read().decode('utf-8', errors='ignore')
+        # Retry once without custom slashtag if slashtag format was rejected
         try:
-            # Fallback without custom slashtag if name exists
             payload.pop("slashtag", None)
             req = urllib.request.Request(endpoint, data=json.dumps(payload).encode('utf-8'), headers=headers, method="POST")
             with urllib.request.urlopen(req, timeout=12) as resp:
                 data = json.loads(resp.read().decode('utf-8'))
                 short_url = data.get("shortUrl")
                 if short_url:
-                    return f"https://{short_url}" if not short_url.startswith("http") else short_url
-        except Exception as err:
-            print(f"Rebrandly Failed completely: {err}")
+                    final_short = f"https://{short_url}" if not short_url.startswith("http") else short_url
+                    return True, final_short
+        except Exception:
+            return False, f"Rebrandly API Error ({e.code}): {err_msg}"
+    except Exception as ex:
+        return False, f"Rebrandly Request Exception: {str(ex)}"
 
-    return destination_url
+    return False, "Could not obtain short URL from Rebrandly response."
 
 def generate_unique_referral_code(user_records):
     while True:
@@ -198,7 +243,6 @@ async def channel_db_sync_handler(update: Update, context: ContextTypes.DEFAULT_
     if not post or post.chat_id != DB_CHANNEL_ID:
         return
 
-    # Parse Media
     caption = post.caption or post.text or ""
     tags = ["Logo", "EnglishTutorial", "HindiTutorial", "ProductLink", "AccountNumber", "Ready"]
     for tag in tags:
@@ -421,25 +465,35 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         target_id = session.get("target_user_id")
         data_dict = session.get("data", {})
         
-        await query.message.edit_text("⏳ Generating Rebrandly Short Link... Please wait.")
+        await query.message.edit_text("⏳ <b>Creating custom Rebrandly Short Link... Please wait.</b>", parse_mode="HTML")
 
         target_user_data = context.application.user_data.get(target_id, {})
         user_orig_link = target_user_data.get("product_link", "https://flipkart.com")
         user_mobile = target_user_data.get("mobile_num", "0000000000")
         prod_name = target_user_data.get("product_name", "Flipkart Product")
-        prod_image = target_user_data.get("product_image")
+        prod_img_bytes = target_user_data.get("product_image_bytes")
 
-        # Create Short Link via Rebrandly Async to not freeze the bot
+        # Create Short Link via Rebrandly Async
         original_hyperlink = data_dict["hyper_link"]
-        shortened_link = await asyncio.to_thread(create_rebrandly_short_link, original_hyperlink, user_mobile)
+        success, short_or_err = await asyncio.to_thread(create_rebrandly_short_link, original_hyperlink, user_mobile)
         
+        if not success:
+            # STOP! Do not send long link to user
+            await query.message.edit_text(
+                f"❌ <b>Rebrandly Short Link Generation Failed!</b>\n\n"
+                f"<b>Reason:</b> {short_or_err}\n\n"
+                f"⚠️ <i>User was NOT notified because the short link could not be created. Please verify your Rebrand_Api key and try again.</i>",
+                parse_mode="HTML"
+            )
+            return
+
         final_price_fmt = format_inr(data_dict["final_price"])
         
         context.bot_data.setdefault("ready_links", {})[target_id] = {
-            "hyper_link": shortened_link,
+            "hyper_link": short_or_err,
             "discount": data_dict["discount"],
             "product_name": prod_name,
-            "product_image": prod_image,
+            "product_image_bytes": prod_img_bytes,
             "final_price": final_price_fmt,
             "orig_link": user_orig_link
         }
@@ -452,13 +506,19 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         try:
             await send_dynamic_media(context, target_id, "Ready", msg_text, kb)
-            await query.message.edit_text(f"✅ Setup Completed!\nShort Link: <code>{shortened_link}</code>\nQualified message sent to User <code>{target_id}</code>.", parse_mode="HTML")
+            await query.message.edit_text(
+                f"✅ <b>Setup Completed!</b>\n\n"
+                f"🔗 <b>Short Link:</b> <code>{short_or_err}</code>\n"
+                f"📦 <b>Product:</b> {prod_name}\n\n"
+                f"Message successfully sent to User <code>{target_id}</code>.",
+                parse_mode="HTML"
+            )
         except Exception as e:
-            await query.message.edit_text(f"✅ Setup Completed, but ❌ Failed to notify User <code>{target_id}</code>. Error: {e}", parse_mode="HTML")
+            await query.message.edit_text(f"✅ Setup Completed in memory, but ❌ Failed to notify User <code>{target_id}</code>. Error: {e}", parse_mode="HTML")
             
         del admin_sessions[ADMIN_ID]
 
-    # -- NEW USER /START MENUS --
+    # -- USER /START MENUS --
     elif data == "lets_start":
         text = "Hi I am Rebrand bot and I have a Tutorial Video. Which language do you want for that video?"
         kb = InlineKeyboardMarkup([[InlineKeyboardButton("Hindi", callback_data="lang_hi"), InlineKeyboardButton("English", callback_data="lang_en")]])
@@ -648,11 +708,11 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("Accept", callback_data=f"adm_accept_{user.id}"), InlineKeyboardButton("Reject", callback_data=f"adm_reject_{user.id}")]])
         
-        # Send admin notification with product image preview if present
-        img_url = context.user_data.get('product_image')
-        if img_url:
+        # Send admin notification with product image preview
+        img_bytes = context.user_data.get('product_image_bytes')
+        if img_bytes:
             try:
-                await context.bot.send_photo(chat_id=ADMIN_ID, photo=img_url, caption=admin_message, parse_mode="HTML", reply_markup=keyboard)
+                await context.bot.send_photo(chat_id=ADMIN_ID, photo=io.BytesIO(img_bytes), caption=admin_message, parse_mode="HTML", reply_markup=keyboard)
             except Exception:
                 await context.bot.send_message(chat_id=ADMIN_ID, text=admin_message, parse_mode="HTML", reply_markup=keyboard)
         else:
@@ -682,11 +742,11 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif data.startswith("adm_accept_"):
         target_id = int(data.split("adm_accept_")[1])
         admin_sessions[ADMIN_ID] = {"target_user_id": target_id, "step": "WAITING_ALL_DETAILS", "data": {}}
-        prompt = (f"✅ Accepted User {target_id}.\n\n"
-                  "<b>Send details in exactly 3 lines (Product name is auto-fetched):</b>\n\n"
+        prompt = (f"✅ Accepted User <code>{target_id}</code>.\n\n"
+                  "<b>Send details in exactly 3 lines:</b>\n\n"
                   "Line 1: Discount (e.g. 50%)\n"
                   "Line 2: Final Price (e.g. 45000)\n"
-                  "Line 3: HyperLink")
+                  "Line 3: HyperLink (Long link to shorten)")
         await query.message.edit_text(prompt, parse_mode="HTML")
 
     # -- POST-APPROVAL WORKFLOW FOR USER --
@@ -733,12 +793,13 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             
         kb = InlineKeyboardMarkup([[InlineKeyboardButton("🔴 Buy Now 🔴", url=url)]])
         
-        # Send with Scraped Product Image if available
-        image_att = d_data.get('product_image')
-        if image_att:
+        # Send downloaded Product Image as attachment bytes
+        image_bytes = d_data.get('product_image_bytes')
+        if image_bytes:
             try:
-                await context.bot.send_photo(chat_id=chat_id, photo=image_att, caption=text, parse_mode="HTML", reply_markup=kb)
-            except Exception:
+                await context.bot.send_photo(chat_id=chat_id, photo=io.BytesIO(image_bytes), caption=text, parse_mode="HTML", reply_markup=kb)
+            except Exception as e:
+                print(f"Error sending photo to user: {e}")
                 await context.bot.send_message(chat_id=chat_id, text=text, parse_mode="HTML", reply_markup=kb, disable_web_page_preview=True)
         else:
             await context.bot.send_message(chat_id=chat_id, text=text, parse_mode="HTML", reply_markup=kb, disable_web_page_preview=True)
@@ -842,10 +903,10 @@ async def media_and_text_handler(update: Update, context: ContextTypes.DEFAULT_T
             
             verify_text = (
                 f"Please verify the details for User <code>{target_id}</code>:\n\n"
-                f"📦 <b>Product Header:</b> {auto_prod_name} <i>(Auto-Written)</i>\n"
+                f"📦 <b>Product Header:</b> {auto_prod_name} <i>(Auto-Extracted)</i>\n"
                 f"💸 <b>Discount:</b> {discount}\n"
                 f"💰 <b>Final Price:</b> {format_inr(final_price)}\n"
-                f"🔗 <b>Target HyperLink:</b> {hyperlink}\n\n"
+                f"🔗 <b>Target HyperLink (To Shorten):</b> {hyperlink}\n\n"
                 f"Are these correct? On confirmation, the link will be shortened via Rebrandly."
             )
             kb = InlineKeyboardMarkup([
@@ -972,14 +1033,14 @@ async def media_and_text_handler(update: Update, context: ContextTypes.DEFAULT_T
     if state == "WAITING_FLIPKART_LINK" and text:
         clean_link = extract_flipkart_link(text)
         if clean_link:
-            status_msg = await update.message.reply_text("🔍 Fetching product details from link...")
+            status_msg = await update.message.reply_text("🔍 Fetching product details from Flipkart...")
             
-            # Fetch product title & image automatically in background
-            p_title, p_image = await asyncio.to_thread(fetch_product_metadata, clean_link)
+            # Fetch product title & download image bytes directly
+            p_title, p_image_bytes = await asyncio.to_thread(fetch_flipkart_metadata, clean_link)
             
             context.user_data["product_link"] = clean_link
             context.user_data["product_name"] = p_title
-            context.user_data["product_image"] = p_image
+            context.user_data["product_image_bytes"] = p_image_bytes
             context.user_data["state"] = "WAITING_MOBILE_NUMBER"
             
             try:
