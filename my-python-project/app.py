@@ -5,6 +5,7 @@ import asyncio
 import time
 import random
 import string
+import requests
 from datetime import datetime
 from threading import Thread
 from flask import Flask
@@ -71,6 +72,41 @@ def generate_unique_referral_code(user_records):
         code = ''.join(random.choices(string.ascii_uppercase + string.digits, k=7))
         if not any(r.get("refer_code") == code for r in user_records.values()):
             return code
+
+def create_rebrandly_short_link(destination_url: str, user_mobile: str) -> str:
+    """Rebrandly API link shortener.
+    Creates custom back-half slashtag: Flipkart-UserMobile-8DigitCode
+    (e.g., https://rebrand.ly/Flipkart-9876543210-UDN873JD3)
+    """
+    api_key = os.environ.get("Rebrand_Api")
+    if not api_key:
+        print("⚠️ Rebrand_Api Environment Variable missing! Using original link.")
+        return destination_url
+
+    random_code = "".join(random.choices(string.ascii_uppercase + string.digits, k=8))
+    slashtag = f"Flipkart-{user_mobile}-{random_code}"
+
+    endpoint = "https://api.rebrandly.com/v1/links"
+    headers = {
+        "Content-Type": "application/json",
+        "apikey": api_key
+    }
+    payload = {
+        "destination": destination_url,
+        "slashtag": slashtag
+    }
+
+    try:
+        response = requests.post(endpoint, json=payload, headers=headers, timeout=10)
+        if response.status_code in [200, 201]:
+            data = response.json()
+            return f"https://{data.get('shortUrl')}"
+        else:
+            print(f"❌ Rebrandly API Error: {response.status_code} - {response.text}")
+            return destination_url
+    except Exception as e:
+        print(f"❌ Rebrandly Request Exception: {e}")
+        return destination_url
 
 async def sync_user_to_channel(context: ContextTypes.DEFAULT_TYPE, user_id: int, status: str, trial: int, last_report: float = 0.0, refer_code: str = "None", refer_from: str = "None", reward_given: str = "False"):
     user_records = context.bot_data.setdefault("user_records", {})
@@ -339,9 +375,14 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         final_price_fmt = format_inr(data_dict["final_price"])
         target_user_data = context.application.user_data.get(target_id, {})
         user_orig_link = target_user_data.get("product_link", "https://flipkart.com")
-        
+        user_mobile = target_user_data.get("mobile_num", "0000000000")
+
+        # Shorten HyperLink via Rebrandly API
+        original_hyperlink = data_dict["hyper_link"]
+        short_hyperlink = create_rebrandly_short_link(original_hyperlink, user_mobile)
+
         context.bot_data.setdefault("ready_links", {})[target_id] = {
-            "hyper_link": data_dict["hyper_link"],
+            "hyper_link": short_hyperlink,
             "discount": data_dict["discount"],
             "product_name": data_dict["product_name"],
             "final_price": final_price_fmt,
@@ -356,12 +397,11 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         try:
             await send_dynamic_media(context, target_id, "Ready", msg_text, kb)
-            await query.message.edit_text(f"✅ Setup Completed! Qualified message successfully sent to User <code>{target_id}</code>.", parse_mode="HTML")
+            await query.message.edit_text(f"✅ Setup Completed!\nShort Link: <code>{short_hyperlink}</code>\nSuccessfully sent to User <code>{target_id}</code>.", parse_mode="HTML")
         except Exception as e:
             await query.message.edit_text(f"✅ Setup Completed in memory, but ❌ Failed to notify User <code>{target_id}</code>. Error: {e}", parse_mode="HTML")
             
         del admin_sessions[ADMIN_ID]
-
 
     # -- NEW USER /START MENUS --
     elif data == "lets_start":
