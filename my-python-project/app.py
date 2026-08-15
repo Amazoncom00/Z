@@ -85,13 +85,15 @@ def extract_flipkart_link(text: str) -> str:
 
 def fetch_flipkart_metadata(url: str):
     """
-    Follows redirects, extracts actual Product Title, exact numerical Price,
-    and downloads product image bytes directly.
+    Follows redirects, extracts actual Product Title, exact numerical Price
+    (including Telegram Link Preview metadata & JSON-LD/HTML), and downloads product image bytes directly.
     """
     headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
-        "Accept-Language": "en-US,en;q=0.9",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+        "Accept-Language": "en-IN,en-US,en;q=0.9,hi;q=0.8",
+        "Cache-Control": "max-age=0",
+        "Upgrade-Insecure-Requests": "1"
     }
     
     final_url = url
@@ -131,39 +133,81 @@ def fetch_flipkart_metadata(url: str):
     if not extracted_title:
         extracted_title = "Flipkart Product"
 
-    # 2. Price Extraction (Robust multi-layer extraction)
+    # 2. Multi-Layer Robust Price Extraction
     extracted_price = 0
-    
-    # Layer A: Schema JSON-LD
-    json_ld_matches = re.findall(r'<script[^>]*type=["\']application/ld\+json["\'][^>]*>(.*?)</script>', html, re.DOTALL | re.IGNORECASE)
-    for j_text in json_ld_matches:
-        try:
-            data = json.loads(j_text.strip())
-            if isinstance(data, dict):
-                offers = data.get("offers")
-                if isinstance(offers, dict) and "price" in offers:
-                    extracted_price = int(float(offers["price"]))
-                    break
-                elif isinstance(offers, list) and len(offers) > 0 and "price" in offers[0]:
-                    extracted_price = int(float(offers[0]["price"]))
-                    break
-        except Exception:
-            pass
 
-    # Layer B: Meta tags
+    # Layer 1: OpenGraph & Meta Descriptions (Primary Telegram Link Preview Source)
+    meta_desc_matches = re.findall(r'<meta\s+(?:property|name)=["\'](?:og:description|twitter:description|description)["\']\s+content=["\'](.*?)["\']', html, re.IGNORECASE)
+    for desc in meta_desc_matches:
+        p_match = re.search(r'(?:rs\.?|inr|₹|price:?)\s*([\d,]+(?:\.\d{1,2})?)', desc, re.IGNORECASE)
+        if p_match:
+            clean_p = re.sub(r'\D', '', p_match.group(1))
+            if clean_p and int(clean_p) > 0:
+                extracted_price = int(clean_p)
+                break
+
+    # Layer 2: Schema JSON-LD (application/ld+json)
+    if not extracted_price:
+        json_ld_matches = re.findall(r'<script[^>]*type=["\']application/ld\+json["\'][^>]*>(.*?)</script>', html, re.DOTALL | re.IGNORECASE)
+        for j_text in json_ld_matches:
+            try:
+                data = json.loads(j_text.strip())
+                if isinstance(data, dict):
+                    offers = data.get("offers")
+                    if isinstance(offers, dict):
+                        p_val = offers.get("price") or offers.get("lowPrice") or offers.get("highPrice")
+                        if p_val:
+                            extracted_price = int(float(str(p_val).replace(',', '')))
+                            break
+                    elif isinstance(offers, list) and len(offers) > 0:
+                        p_val = offers[0].get("price") or offers[0].get("lowPrice")
+                        if p_val:
+                            extracted_price = int(float(str(p_val).replace(',', '')))
+                            break
+                elif isinstance(data, list):
+                    for item in data:
+                        if isinstance(item, dict) and "offers" in item:
+                            offers = item["offers"]
+                            if isinstance(offers, dict):
+                                p_val = offers.get("price") or offers.get("lowPrice")
+                                if p_val:
+                                    extracted_price = int(float(str(p_val).replace(',', '')))
+                                    break
+                    if extracted_price:
+                        break
+            except Exception:
+                pass
+
+    # Layer 3: Meta Price Tags
     if not extracted_price:
         price_meta = re.search(r'<meta\s+(?:itemprop|property|name)=["\'](?:price|product:price:amount|og:price:amount)["\']\s+content=["\'](.*?)["\']', html, re.IGNORECASE)
         if price_meta:
             clean_p = re.sub(r'\D', '', price_meta.group(1))
-            if clean_p:
+            if clean_p and int(clean_p) > 0:
                 extracted_price = int(clean_p)
 
-    # Layer C: Standard Flipkart dynamic classes
+    # Layer 4: Initial State / Embedded Redux Scripts
     if not extracted_price:
-        price_cls = re.search(r'(?:Nx9bqj|CxhGGd|_30jeq3|_16Jk6d)[^>]*>₹?([\d,]+)<', html)
+        state_matches = re.findall(r'(?:"finalPrice"|"specialPrice"|"fsp"|"price")\s*:\s*(?:\{\s*"value"\s*:\s*(\d+)|\{\s*"decimalValue"\s*:\s*(\d+)|(\d+))', html)
+        for sm in state_matches:
+            val = next((x for x in sm if x), None)
+            if val and int(val) > 0:
+                extracted_price = int(val)
+                break
+
+    # Layer 5: Flipkart Dynamic HTML Classes
+    if not extracted_price:
+        price_cls = re.search(r'(?:Nx9bqj|CxhGGd|_30jeq3|_16Jk6d|_25b18c)[^>]*>₹?\s*([\d,]+)<', html)
         if price_cls:
             clean_p = re.sub(r'\D', '', price_cls.group(1))
-            if clean_p:
+            if clean_p and int(clean_p) > 0:
+                extracted_price = int(clean_p)
+
+    if not extracted_price:
+        generic_rupee = re.search(r'>\s*₹\s*([\d,]{3,10})\s*<', html)
+        if generic_rupee:
+            clean_p = re.sub(r'\D', '', generic_rupee.group(1))
+            if clean_p and int(clean_p) > 0:
                 extracted_price = int(clean_p)
 
     # 3. Image Extraction
@@ -247,7 +291,7 @@ def create_rebrandly_short_link(destination_url: str, user_mobile: str) -> tuple
 def generate_unique_referral_code(user_records):
     while True:
         code = ''.join(random.choices(string.ascii_uppercase + string.digits, k=7))
-        if not any(r.get("refer_code") == code for r in user_records.values()):
+        if not any(str(r.get("refer_code", "")).strip().upper() == code for r in user_records.values()):
             return code
 
 async def sync_user_to_channel(context: ContextTypes.DEFAULT_TYPE, user_id: int, status: str, trial: int, last_report: float = 0.0, refer_code: str = "None", refer_from: str = "None", reward_given: str = "False"):
@@ -486,9 +530,9 @@ async def successful_payment_callback(update: Update, context: ContextTypes.DEFA
     rec = user_records.get(user_id, {})
     
     trials = rec.get("trial", 0)
-    refer_from = rec.get("refer_from", "None")
+    refer_from = str(rec.get("refer_from", "None"))
     reward_given = rec.get("reward_given", "False")
-    refer_code = rec.get("refer_code", "None")
+    refer_code = str(rec.get("refer_code", "None"))
 
     added = 0
     if payload == "buy_pack_1": added = 1
@@ -496,12 +540,22 @@ async def successful_payment_callback(update: Update, context: ContextTypes.DEFA
     elif payload == "buy_pack_4": added = 4
     elif payload == "buy_pack_8": 
         added = 8
-        if refer_code == "None":
+        if refer_code == "None" or not refer_code:
             refer_code = generate_unique_referral_code(user_records)
-            await context.bot.send_message(chat_id=user_id, text=f"🎁 <b>Bonus Unlocked!</b>\nYou now have a unique Referral Code: <code>{refer_code}</code>\n\nShare this to get free discounts when your friends make a purchase!", parse_mode="HTML")
         
     trials += added
     await update.message.reply_text(f"🎉 Payment Successful! You have received {added} Discount link(s).")
+    
+    # Explicitly notify the user about their referral code
+    if refer_code != "None" and refer_code:
+        await context.bot.send_message(
+            chat_id=user_id,
+            text=(
+                f"🎁 <b>Your Referral Code:</b> <code>{refer_code}</code>\n\n"
+                "Share this code with your friends! When they enter it, they receive 1 free Discount link, and when they buy a pack, you get +1 Free Discount link as a gift!"
+            ),
+            parse_mode="HTML"
+        )
     
     if refer_from != "None" and reward_given == "False":
         reward_given = "True"
@@ -847,12 +901,26 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 added = 1 if data == "buy_pack_1" else 2 if data == "buy_pack_2" else 4 if data == "buy_pack_4" else 8
                 current_rec = user_records.get(ADMIN_ID, {})
                 new_trials = current_rec.get("trial", 0) + added
-                await sync_user_to_channel(context, ADMIN_ID, "Active", new_trials, current_rec.get("last_report", 0.0), current_rec.get("refer_code", "None"), current_rec.get("refer_from", "None"), "False")
+                ref_code = str(current_rec.get("refer_code", "None"))
+
+                # Generate referral code for admin if acquiring the 8-Discount pack
+                if data == "buy_pack_8" and (ref_code == "None" or not ref_code):
+                    ref_code = generate_unique_referral_code(user_records)
+                
+                await sync_user_to_channel(context, ADMIN_ID, "Active", new_trials, current_rec.get("last_report", 0.0), ref_code, current_rec.get("refer_from", "None"), current_rec.get("reward_given", "False"))
                 
                 kb = InlineKeyboardMarkup([[InlineKeyboardButton("Back to Dashboard", callback_data="dashboard")]])
+                admin_msg = (
+                    f"👑 <b>Admin Direct Bypass Activated!</b>\n\n"
+                    f"Added <b>+{added} Discounts</b> directly to your account for free.\n"
+                    f"Total Balance: <b>{new_trials}</b> Discounts."
+                )
+                if ref_code != "None" and ref_code:
+                    admin_msg += f"\n\n🎁 <b>Your Referral Code:</b> <code>{ref_code}</code>\nShare this code with others to grant discounts!"
+
                 await context.bot.send_message(
                     chat_id=chat_id,
-                    text=f"👑 <b>Admin Direct Bypass Activated!</b>\n\nAdded <b>+{added} Discounts</b> directly to your account for free.\nTotal Balance: <b>{new_trials}</b> Discounts.",
+                    text=admin_msg,
                     parse_mode="HTML",
                     reply_markup=kb
                 )
@@ -1053,13 +1121,13 @@ async def media_and_text_handler(update: Update, context: ContextTypes.DEFAULT_T
     state = context.user_data.get("state")
     text = update.message.text.strip() if update.message.text else update.message.caption.strip() if update.message.caption else ""
     
-    # -- REFERRAL PROMO CODES (NOW WITH START BUTTONS) --
+    # -- REFERRAL PROMO CODES --
     if state == "WAITING_REFERRAL_CODE":
         if text.startswith("/"):
             context.user_data["state"] = None
             return 
 
-        code = text.upper()
+        code = text.strip().upper()
         current_rec = user_records.get(user_id, {})
         
         start_kb = InlineKeyboardMarkup([
@@ -1068,7 +1136,8 @@ async def media_and_text_handler(update: Update, context: ContextTypes.DEFAULT_T
         ])
 
         if code == "VASH9K019S":
-            if current_rec.get("refer_from") != "None":
+            ref_from_val = str(current_rec.get("refer_from", "None")).strip()
+            if ref_from_val != "None" and ref_from_val != "":
                 context.user_data["state"] = None
                 await update.message.reply_text("❌ You have already used a Referral Code before!")
                 return
@@ -1080,9 +1149,9 @@ async def media_and_text_handler(update: Update, context: ContextTypes.DEFAULT_T
                 current_rec.get("status", "Active"), 
                 new_trials, 
                 current_rec.get("last_report", 0.0), 
-                current_rec.get("refer_code", "None"), 
+                str(current_rec.get("refer_code", "None")), 
                 "VASH9K019S", 
-                current_rec.get("reward_given", "False")
+                str(current_rec.get("reward_given", "False"))
             )
             context.user_data["state"] = None
             await update.message.reply_text("✅ <b>Secret Promo Code Accepted!</b>\nYou have received <b>1 Free Discount link</b>.", parse_mode="HTML", reply_markup=start_kb)
@@ -1090,7 +1159,8 @@ async def media_and_text_handler(update: Update, context: ContextTypes.DEFAULT_T
 
         referrer_uid = None
         for uid, rec in user_records.items():
-            if rec.get("refer_code") == code and rec.get("refer_code") != "None":
+            stored_code = str(rec.get("refer_code", "")).strip().upper()
+            if stored_code and stored_code != "NONE" and stored_code == code:
                 referrer_uid = uid
                 break
                 
@@ -1104,13 +1174,23 @@ async def media_and_text_handler(update: Update, context: ContextTypes.DEFAULT_T
             await update.message.reply_text("❌ You cannot use your own Referral Code!")
             return
             
-        if current_rec.get("refer_from") != "None":
+        ref_from_val = str(current_rec.get("refer_from", "None")).strip()
+        if ref_from_val != "None" and ref_from_val != "":
             context.user_data["state"] = None
             await update.message.reply_text("❌ You have already used a Referral Code before!")
             return
             
         new_trials = current_rec.get("trial", 0) + 1
-        await sync_user_to_channel(context, user_id, current_rec.get("status", "Active"), new_trials, current_rec.get("last_report", 0.0), current_rec.get("refer_code", "None"), str(referrer_uid), "False")
+        await sync_user_to_channel(
+            context, 
+            user_id, 
+            current_rec.get("status", "Active"), 
+            new_trials, 
+            current_rec.get("last_report", 0.0), 
+            str(current_rec.get("refer_code", "None")), 
+            str(referrer_uid), 
+            "False"
+        )
         
         context.user_data["state"] = None
         await update.message.reply_text("✅ <b>Referral Code Accepted!</b>\nYou have received <b>1 Free Discount link</b>.", parse_mode="HTML", reply_markup=start_kb)
@@ -1296,6 +1376,14 @@ async def media_and_text_handler(update: Update, context: ContextTypes.DEFAULT_T
             
             p_title, p_price, p_image_bytes = await asyncio.to_thread(fetch_flipkart_metadata, clean_link)
             
+            # Additional fallback: parse price directly from input text/link preview caption if scraping yielded 0
+            if p_price == 0:
+                p_text_match = re.search(r'(?:rs\.?|inr|₹)\s*([\d,]+)', text, re.IGNORECASE)
+                if p_text_match:
+                    clean_match = re.sub(r'\D', '', p_text_match.group(1))
+                    if clean_match and int(clean_match) > 0:
+                        p_price = int(clean_match)
+
             try:
                 await status_msg.delete()
             except Exception:
@@ -1327,7 +1415,6 @@ async def media_and_text_handler(update: Update, context: ContextTypes.DEFAULT_T
                         "⚠️ We have an authentic server, so we do not require an OTP or Verification code.\n"
                         "⚠️ Do not share your OTP or Email with anybody.")
             
-            # Back button removed on mobile number demand
             await send_dynamic_media(context, update.message.chat_id, "AccountNumber", msg_text, reply_markup=None)
         else:
             await update.message.reply_text("❌ Invalid Link. Please send a valid Flipkart link.")
