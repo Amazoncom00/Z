@@ -39,13 +39,13 @@ flask_app = Flask(__name__)
 
 @flask_app.route('/')
 def home():
-    return "Rebrand Bot is Running 24/7 Successfully!"
+    return "Rebrand Bot with Lejumo API is Running 24/7 Successfully!"
 
 def run_flask():
     port = int(os.environ.get("PORT", 8080))
     flask_app.run(host="0.0.0.0", port=port, use_reloader=False)
 
-# ---------------- HELPERS, SCRAPERS & SHORTENER ---------------- #
+# ---------------- HELPERS, SCRAPERS & LEJUMO SHORTENER ---------------- #
 async def edit_message_or_caption(query, text, reply_markup=None, parse_mode="HTML"):
     """Safely edits text message or photo/media caption without Telegram API errors."""
     try:
@@ -136,12 +136,14 @@ def fetch_flipkart_metadata(url: str):
     # 2. Strict Discounted Selling Price (FSP) Extraction
     extracted_price = 0
 
+    # Layer 1: Flipkart Selling Price CSS Classes (Nx9bqj / _30jeq3)
     selling_price_match = re.search(r'class=["\'][^"\']*(?:Nx9bqj|_30jeq3)[^"\']*["\'][^>]*>₹?\s*([\d,]+)', html)
     if selling_price_match:
         clean_p = re.sub(r'\D', '', selling_price_match.group(1))
         if clean_p and int(clean_p) > 0:
             extracted_price = int(clean_p)
 
+    # Layer 2: Redux / Page Data JSON
     if not extracted_price:
         fsp_patterns = [
             r'"(?:FSP|SPECIAL_PRICE|finalPrice|discountedPrice|specialPrice)"[^}]*?"(?:value|decimalValue|amount)"\s*:\s*"?(\d+)',
@@ -157,6 +159,7 @@ def fetch_flipkart_metadata(url: str):
                     extracted_price = int(val)
                     break
 
+    # Layer 3: Schema JSON-LD
     if not extracted_price:
         json_ld_matches = re.findall(r'<script[^>]*type=["\']application/ld\+json["\'][^>]*>(.*?)</script>', html, re.DOTALL | re.IGNORECASE)
         for j_text in json_ld_matches:
@@ -189,6 +192,7 @@ def fetch_flipkart_metadata(url: str):
             except Exception:
                 pass
 
+    # Layer 4: OpenGraph / Meta Descriptions
     if not extracted_price:
         meta_desc_matches = re.findall(r'<meta\s+(?:property|name)=["\'](?:og:description|twitter:description|description)["\']\s+content=["\'](.*?)["\']', html, re.IGNORECASE)
         for desc in meta_desc_matches:
@@ -202,6 +206,7 @@ def fetch_flipkart_metadata(url: str):
                 extracted_price = min(parsed_prices)
                 break
 
+    # Layer 5: Meta Price Tags
     if not extracted_price:
         price_meta = re.search(r'<meta\s+(?:itemprop|property|name)=["\'](?:price|product:price:amount|og:price:amount)["\']\s+content=["\'](.*?)["\']', html, re.IGNORECASE)
         if price_meta:
@@ -232,7 +237,7 @@ def fetch_flipkart_metadata(url: str):
     return extracted_title, extracted_price, image_bytes
 
 def create_lejumo_short_link(destination_url: str) -> tuple[bool, str]:
-    """Creates a shortened link using Lejumo API."""
+    """Creates a shortened link using the Lejumo API (POST https://www.lejumo.com/api/shorten)."""
     lejumo_key = (
         os.environ.get("Lejumo_Api")
         or os.environ.get("LEJUMO_API")
@@ -241,40 +246,37 @@ def create_lejumo_short_link(destination_url: str) -> tuple[bool, str]:
     if not lejumo_key:
         return False, "Lejumo_Api environment variable is missing!"
 
+    endpoint = "https://www.lejumo.com/api/shorten"
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {lejumo_key.strip()}",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
+    }
+    
     dest = destination_url.strip()
     if not dest.startswith(('http://', 'https://')):
         dest = 'https://' + dest
 
-    endpoint = "https://lejumo.com/api/v1/links"
-    headers = {
-        "Content-Type": "application/json",
-        "Authorization": f"Bearer {lejumo_key.strip()}"
-    }
-    payload = {
-        "destination": dest,
-        "url": dest
-    }
+    payload = {"url": dest}
 
     try:
-        req = urllib.request.Request(endpoint, data=json.dumps(payload).encode('utf-8'), headers=headers, method="POST")
+        req = urllib.request.Request(
+            endpoint, 
+            data=json.dumps(payload).encode('utf-8'), 
+            headers=headers, 
+            method="POST"
+        )
         with urllib.request.urlopen(req, timeout=12) as resp:
             data = json.loads(resp.read().decode('utf-8'))
-            short_url = data.get("shortUrl") or data.get("short_url") or data.get("url")
+            short_url = data.get("short") or data.get("shortUrl")
             if short_url:
                 final_short = f"https://{short_url}" if not short_url.startswith("http") else short_url
                 return True, final_short
-    except Exception:
-        try:
-            endpoint_alt = f"https://lejumo.com/api?key={lejumo_key.strip()}&url={urllib.parse.quote(dest)}"
-            req = urllib.request.Request(endpoint_alt, headers={"User-Agent": "Mozilla/5.0"}, method="GET")
-            with urllib.request.urlopen(req, timeout=12) as resp:
-                data = json.loads(resp.read().decode('utf-8'))
-                short_url = data.get("shortUrl") or data.get("short_url") or data.get("url") or data.get("link")
-                if short_url:
-                    final_short = f"https://{short_url}" if not short_url.startswith("http") else short_url
-                    return True, final_short
-        except Exception as ex:
-            return False, f"Lejumo API Error: {str(ex)}"
+    except urllib.error.HTTPError as e:
+        err_msg = e.read().decode('utf-8', errors='ignore')
+        return False, f"Lejumo API Error ({e.code}): {err_msg}"
+    except Exception as ex:
+        return False, f"Lejumo Exception: {str(ex)}"
 
     return False, "Could not obtain short URL from Lejumo response."
 
@@ -285,19 +287,29 @@ def generate_unique_referral_code(user_records):
             return code
 
 async def sync_user_to_channel(context: ContextTypes.DEFAULT_TYPE, user_id: int, status: str, trial: int, last_report: float = 0.0, refer_code: str = "None", refer_from: str = "None", reward_given: str = "False"):
+    """Edits existing message in DB channel without creating duplicate rows."""
     user_records = context.bot_data.setdefault("user_records", {})
     text = (f"Userid: {user_id}\nStatus: {status}\nTrial: {trial}\n"
             f"LastReport: {last_report}\nReferCode: {refer_code}\n"
             f"ReferFrom: {refer_from}\nRewardGiven: {reward_given}")
     
-    if user_id in user_records and "msg_id" in user_records[user_id]:
-        msg_id = user_records[user_id]["msg_id"]
+    rec = user_records.get(user_id, {})
+    msg_id = rec.get("msg_id")
+    
+    if msg_id:
         try:
             await context.bot.edit_message_text(chat_id=DB_CHANNEL_ID, message_id=msg_id, text=text)
             user_records[user_id] = {"msg_id": msg_id, "status": status, "trial": trial, "last_report": last_report, "refer_code": refer_code, "refer_from": refer_from, "reward_given": reward_given}
             return
-        except Exception:
-            pass 
+        except Exception as e:
+            err_str = str(e).lower()
+            if "message is not modified" in err_str:
+                user_records[user_id] = {"msg_id": msg_id, "status": status, "trial": trial, "last_report": last_report, "refer_code": refer_code, "refer_from": refer_from, "reward_given": reward_given}
+                return
+            if "message to edit not found" not in err_str and "chat not found" not in err_str:
+                print(f"Edit DB Note: {e}")
+                user_records[user_id] = {"msg_id": msg_id, "status": status, "trial": trial, "last_report": last_report, "refer_code": refer_code, "refer_from": refer_from, "reward_given": reward_given}
+                return
             
     try:
         msg = await context.bot.send_message(chat_id=DB_CHANNEL_ID, text=text)
@@ -373,7 +385,6 @@ async def hydrate_channel_database_on_startup(app: Application):
         await app.bot.delete_message(chat_id=DB_CHANNEL_ID, message_id=latest_id)
 
         start_id = max(1, latest_id - 600)
-
         for mid in range(latest_id - 1, start_id, -1):
             try:
                 fwd = await app.bot.forward_message(chat_id=DB_CHANNEL_ID, from_chat_id=DB_CHANNEL_ID, message_id=mid)
@@ -532,14 +543,15 @@ async def successful_payment_callback(update: Update, context: ContextTypes.DEFA
             refer_code = generate_unique_referral_code(user_records)
         
     trials += added
-    await update.message.reply_text(f"🎉 Payment Successful! You have received {added} Discount point(s).")
+    await update.message.reply_text(f"🎉 Payment Successful! You have received {added} Discount Point(s).")
     
+    # Explicitly notify the user about their referral code
     if refer_code != "None" and refer_code:
         await context.bot.send_message(
             chat_id=user_id,
             text=(
                 f"🎁 <b>Your Referral Code:</b> <code>{refer_code}</code>\n\n"
-                "Share this code with your friends! When they enter it, they receive 1 free Discount point, and when they buy a pack, you get +1 Free Discount point as a gift!"
+                "Share this code with your friends! When they enter it, they receive 1 free Discount Point, and when they buy a pack, you get +1 Free Discount Point as a gift!"
             ),
             parse_mode="HTML"
         )
@@ -552,7 +564,7 @@ async def successful_payment_callback(update: Update, context: ContextTypes.DEFA
             if ref_rec:
                 r_trials = ref_rec.get("trial", 0) + 1
                 await sync_user_to_channel(context, ref_id, ref_rec.get("status", "Active"), r_trials, ref_rec.get("last_report", 0.0), ref_rec.get("refer_code", "None"), ref_rec.get("refer_from", "None"), ref_rec.get("reward_given", "False"))
-                await context.bot.send_message(chat_id=ref_id, text="🎁 <b>Bonus!</b>\nSomeone you referred just made their first purchase! You have been rewarded with +1 Free Discount point!", parse_mode="HTML")
+                await context.bot.send_message(chat_id=ref_id, text="🎁 <b>Bonus!</b>\nSomeone you referred just made their first purchase! You have been rewarded with +1 Free Discount Point!", parse_mode="HTML")
         except Exception: pass
 
     await sync_user_to_channel(context, user_id, rec.get("status", "Active"), trials, rec.get("last_report", 0.0), refer_code, refer_from, reward_given)
@@ -567,6 +579,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     data = query.data
     user_records = context.bot_data.get("user_records", {})
 
+    # Double-tap Lock Protection
     lock_key = f"{user.id}_{data}"
     if lock_key in click_locks:
         await query.answer("⏳ Processing, please wait...")
@@ -608,14 +621,15 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             try: await query.message.delete()
             except: pass
 
-        # -- ADMIN ACCEPT WORKFLOW --
+        # -- ADMIN ACCEPT WORKFLOW (2 LINES ONLY - AUTO DISCOUNT CALCULATION) --
         elif data.startswith("adm_accept_"):
             target_id = int(data.split("adm_accept_")[1])
             admin_sessions[ADMIN_ID] = {"target_user_id": target_id, "step": "WAITING_ALL_DETAILS", "data": {}}
             prompt = (f"✅ <b>Accepted User <code>{target_id}</code></b>\n\n"
                       "<b>Send details in exactly 2 lines:</b>\n"
                       "Line 1: Final Price (e.g. 45000)\n"
-                      "Line 2: HyperLink (Long affiliate link to shorten)")
+                      "Line 2: HyperLink (Long affiliate link to shorten)\n\n"
+                      "<i>Note: Discount amount and percentage will be auto-calculated.</i>")
             await edit_message_or_caption(query, prompt, parse_mode="HTML")
 
         # -- ADMIN REJECT MENU --
@@ -661,6 +675,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             p_name = req_data.get("product_name", "Flipkart Product")
             p_link = req_data.get("product_link", "https://flipkart.com")
             
+            # Refund 1 point back
             rec = user_records.get(target_id, {})
             refunded_trials = rec.get("trial", 0) + 1
             await sync_user_to_channel(context, target_id, rec.get("status", "Active"), refunded_trials, rec.get("last_report", 0.0), rec.get("refer_code", "None"), rec.get("refer_from", "None"), rec.get("reward_given", "False"))
@@ -686,7 +701,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             target_id = session.get("target_user_id")
             data_dict = session.get("data", {})
             
-            await edit_message_or_caption(query, "⏳ <b>Creating custom Lejumo Short Link... Please wait.</b>", parse_mode="HTML")
+            await edit_message_or_caption(query, "⏳ <b>Creating Lejumo Short Link... Please wait.</b>", parse_mode="HTML")
 
             req_data = context.bot_data.get("pending_requests", {}).get(target_id, {})
             user_orig_link = req_data.get("product_link", "https://flipkart.com")
@@ -731,7 +746,9 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     query,
                     f"✅ <b>Setup Completed!</b>\n\n"
                     f"🔗 <b>Short Link:</b> <code>{short_or_err}</code>\n"
-                    f"📦 <b>Product:</b> {prod_name}\n\n"
+                    f"📦 <b>Product:</b> {prod_name}\n"
+                    f"💸 <b>Discount Applied:</b> {data_dict['discount']}\n"
+                    f"💰 <b>Deal Price:</b> {final_price_fmt}\n\n"
                     f"Message successfully sent to User <code>{target_id}</code>.",
                     parse_mode="HTML"
                 )
@@ -862,10 +879,10 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 [InlineKeyboardButton("Enter Referral Code", callback_data="enter_referral")],
                 [InlineKeyboardButton("Back", callback_data="dashboard")]
             ]
-            text = ("🛒 <b>Discount Store</b>\n\n"
+            text = ("🛒 <b>Discount Points Store</b>\n\n"
                     "Purchase Discount Points using Telegram Stars!\n\n"
                     "💡 <b>Referral Program:</b>\n"
-                    "Buy the 8 Discount Points pack to unlock your own Referral Code! When your friends use it, they get 1 free Discount point, and when they buy a pack, you get 1 free Discount point as a gift!")
+                    "Buy the 8 Discount Points pack to unlock your own Referral Code! When your friends use it, they get 1 free Discount Point, and when they buy a pack, you get 1 free Discount Point as a gift!")
             await context.bot.send_message(chat_id=chat_id, text=text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(buttons))
 
         elif data == "enter_referral":
@@ -894,11 +911,11 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 kb = InlineKeyboardMarkup([[InlineKeyboardButton("Back to Dashboard", callback_data="dashboard")]])
                 admin_msg = (
                     f"👑 <b>Admin Direct Bypass Activated!</b>\n\n"
-                    f"Added <b>+{added} Discount Points</b> directly to your account for free.\n"
+                    f"Added <b>+{added} Discount Point(s)</b> directly to your account for free.\n"
                     f"Total Balance: <b>{new_trials}</b> Discount Points."
                 )
                 if ref_code != "None" and ref_code:
-                    admin_msg += f"\n\n🎁 <b>Your Referral Code:</b> <code>{ref_code}</code>\nShare this code with others to grant discount points!"
+                    admin_msg += f"\n\n🎁 <b>Your Referral Code:</b> <code>{ref_code}</code>\nShare this code with others to grant discounts!"
 
                 await context.bot.send_message(
                     chat_id=chat_id,
@@ -998,7 +1015,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("Accept", callback_data=f"adm_accept_{user.id}"), InlineKeyboardButton("Reject", callback_data=f"adm_reject_menu_{user.id}")]])
             await context.bot.send_message(chat_id=ADMIN_ID, text=admin_message, parse_mode="HTML", reply_markup=keyboard)
 
-        # -- POST-APPROVAL WORKFLOW FOR USER WITH 10-MINUTE TIMER & MIND-TRIGGERING LAYOUT --
+        # -- POST-APPROVAL WORKFLOW FOR USER WITH 10-MINUTE TIMER --
         elif data == "resend_qualified_msg":
             try: await query.message.delete()
             except: pass
@@ -1134,7 +1151,7 @@ async def media_and_text_handler(update: Update, context: ContextTypes.DEFAULT_T
                 str(current_rec.get("reward_given", "False"))
             )
             context.user_data["state"] = None
-            await update.message.reply_text("✅ <b>Secret Promo Code Accepted!</b>\nYou have received <b>1 Free Discount point</b>.", parse_mode="HTML", reply_markup=start_kb)
+            await update.message.reply_text("✅ <b>Secret Promo Code Accepted!</b>\nYou have received <b>1 Free Discount Point</b>.", parse_mode="HTML", reply_markup=start_kb)
             return
 
         referrer_uid = None
@@ -1173,7 +1190,7 @@ async def media_and_text_handler(update: Update, context: ContextTypes.DEFAULT_T
         )
         
         context.user_data["state"] = None
-        await update.message.reply_text("✅ <b>Referral Code Accepted!</b>\nYou have received <b>1 Free Discount point</b>.", parse_mode="HTML", reply_markup=start_kb)
+        await update.message.reply_text("✅ <b>Referral Code Accepted!</b>\nYou have received <b>1 Free Discount Point</b>.", parse_mode="HTML", reply_markup=start_kb)
         return
 
     if state == "WAITING_VOICE_REPORT":
@@ -1195,7 +1212,7 @@ async def media_and_text_handler(update: Update, context: ContextTypes.DEFAULT_T
         context.user_data["state"] = None
         return
 
-    # --- ADMIN WORKFLOW ENGINE ---
+    # --- ADMIN WORKFLOW ENGINE (2 LINES ONLY - AUTO DISCOUNT CALCULATION) ---
     if user_id == ADMIN_ID and user_id in admin_sessions:
         session = admin_sessions[user_id]
         step = session["step"]
@@ -1204,31 +1221,30 @@ async def media_and_text_handler(update: Update, context: ContextTypes.DEFAULT_T
         if step == "WAITING_ALL_DETAILS":
             lines = [line.strip() for line in text.split('\n') if line.strip()]
             if len(lines) < 2:
-                await update.message.reply_text("❌ Please provide exactly 2 lines:\nLine 1: Final Price\nLine 2: HyperLink\n\nTry again:")
+                await update.message.reply_text("❌ Please provide exactly 2 lines:\nLine 1: Final Price (e.g. 45000)\nLine 2: HyperLink\n\nTry again:")
                 return
             
-            final_price_str, hyperlink = lines[0], lines[1]
+            final_price_raw, hyperlink = lines[0], lines[1]
+            final_price_clean = re.sub(r'\D', '', final_price_raw)
+            final_price_num = int(final_price_clean) if final_price_clean else 0
+
             req_data = context.bot_data.get("pending_requests", {}).get(target_id, {})
             auto_prod_name = req_data.get("product_name", "Flipkart Product")
             orig_p = req_data.get("product_price", 0)
 
-            final_p_clean = re.sub(r'\D', '', final_price_str)
-            final_p_val = int(final_p_clean) if final_p_clean else 0
-
-            # Auto-calculate discount from original price and final price
-            if orig_p > 0 and final_p_val > 0:
-                diff = orig_p - final_p_val
-                if diff > 0:
-                    pct = int((diff / orig_p) * 100)
-                    discount = f"{pct}% Off (Save {format_inr(diff)})"
-                else:
-                    discount = "Special Price"
+            # Auto calculate discount amount and discount percentage
+            if orig_p > 0 and final_price_num > 0 and orig_p > final_price_num:
+                diff = orig_p - final_price_num
+                pct = round((diff / orig_p) * 100)
+                discount_calc = f"{format_inr(diff)} ({pct}% OFF)"
+            elif orig_p > 0 and final_price_num > 0:
+                discount_calc = "Special Discount"
             else:
-                discount = "Discounted Offer"
+                discount_calc = "Deal Discount"
 
             session["data"] = {
-                "discount": discount,
-                "final_price": final_p_val,
+                "discount": discount_calc,
+                "final_price": final_price_num if final_price_num > 0 else final_price_raw,
                 "hyper_link": hyperlink
             }
             
@@ -1237,9 +1253,9 @@ async def media_and_text_handler(update: Update, context: ContextTypes.DEFAULT_T
                 f"Please verify the details for User <code>{target_id}</code>:\n\n"
                 f"📦 <b>Product Header:</b> {auto_prod_name}\n"
                 f"🏷 <b>Original Price:</b> {price_dsp}\n"
-                f"💸 <b>Auto-Calculated Discount:</b> {discount}\n"
-                f"💰 <b>Final Price:</b> {format_inr(final_p_val)}\n"
-                f"🔗 <b>Target HyperLink (To Shorten):</b> {hyperlink}\n\n"
+                f"💸 <b>Calculated Discount:</b> {discount_calc}\n"
+                f"💰 <b>Final Price:</b> {format_inr(final_price_num)}\n"
+                f"🔗 <b>Target HyperLink (To Shorten via Lejumo):</b> {hyperlink}\n\n"
                 f"Are these correct? On confirmation, the link will be shortened via Lejumo."
             )
             kb = InlineKeyboardMarkup([
@@ -1385,6 +1401,7 @@ async def media_and_text_handler(update: Update, context: ContextTypes.DEFAULT_T
             except Exception:
                 pass
 
+            # Backend 50K Eligibility Verification
             if p_price > 0 and p_price < 50000:
                 warn_text = (
                     f"❌ <b>Product Not Eligible!</b>\n\n"
@@ -1429,7 +1446,7 @@ async def media_and_text_handler(update: Update, context: ContextTypes.DEFAULT_T
 
             conf_text = (
                 f"{full_name}, you have {trials} discount point(s) left. "
-                "If you continue, we will generate a discounted link, and 1 point will be deducted.\n\n"
+                "If you continue, we will generate a discounted link, and 1 discount point will be deducted.\n\n"
                 f"📦 <b>Product:</b> {context.user_data.get('product_name')}\n"
                 f"💰 <b>Price:</b> {price_display}\n"
                 f"🔗 <b>Link:</b> {context.user_data['product_link']}\n"
@@ -1468,7 +1485,7 @@ def main():
     app.add_handler(MessageHandler(filters.ChatType.PRIVATE & ~filters.COMMAND, media_and_text_handler))
     app.add_handler(MessageHandler(filters.ChatType.CHANNEL, channel_db_sync_handler))
 
-    print("Bot is running 24/7 with 10-Min Timer, Discounted Price Engine & Lejumo integration...")
+    print("Bot is running 24/7 with Lejumo API & Discount Points Engine...")
     app.run_polling()
 
 if __name__ == "__main__":
