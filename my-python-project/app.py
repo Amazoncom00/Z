@@ -85,8 +85,8 @@ def extract_flipkart_link(text: str) -> str:
 
 def fetch_flipkart_metadata(url: str):
     """
-    Follows redirects, extracts actual Product Title, exact numerical Price
-    (including Telegram Link Preview metadata & JSON-LD/HTML), and downloads product image bytes directly.
+    Follows redirects, extracts actual Product Title, exact DISCOUNTED Selling Price (FSP),
+    and downloads product image bytes directly.
     """
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
@@ -133,80 +133,85 @@ def fetch_flipkart_metadata(url: str):
     if not extracted_title:
         extracted_title = "Flipkart Product"
 
-    # 2. Multi-Layer Robust Price Extraction
+    # 2. Strict Discounted Selling Price (FSP) Extraction
     extracted_price = 0
 
-    # Layer 1: OpenGraph & Meta Descriptions (Primary Telegram Link Preview Source)
-    meta_desc_matches = re.findall(r'<meta\s+(?:property|name)=["\'](?:og:description|twitter:description|description)["\']\s+content=["\'](.*?)["\']', html, re.IGNORECASE)
-    for desc in meta_desc_matches:
-        p_match = re.search(r'(?:rs\.?|inr|₹|price:?)\s*([\d,]+(?:\.\d{1,2})?)', desc, re.IGNORECASE)
-        if p_match:
-            clean_p = re.sub(r'\D', '', p_match.group(1))
-            if clean_p and int(clean_p) > 0:
-                extracted_price = int(clean_p)
-                break
+    # Layer 1: Flipkart Dedicated Selling Price CSS Classes (Nx9bqj / _30jeq3)
+    # This targets the actual discounted deal price element directly and ignores strikethrough MRP classes (yRaY8j, _3I9_wc)
+    selling_price_match = re.search(r'class=["\'][^"\']*(?:Nx9bqj|_30jeq3)[^"\']*["\'][^>]*>₹?\s*([\d,]+)', html)
+    if selling_price_match:
+        clean_p = re.sub(r'\D', '', selling_price_match.group(1))
+        if clean_p and int(clean_p) > 0:
+            extracted_price = int(clean_p)
 
-    # Layer 2: Schema JSON-LD (application/ld+json)
+    # Layer 2: Redux / Page Data JSON (Explicit FSP / Special Price / Final Price)
+    if not extracted_price:
+        fsp_patterns = [
+            r'"(?:FSP|SPECIAL_PRICE|finalPrice|discountedPrice|specialPrice)"[^}]*?"(?:value|decimalValue|amount)"\s*:\s*"?(\d+)',
+            r'"(?:fsp|specialPrice|offerPrice)"\s*:\s*(\d+)',
+            r'"prices"\s*:\s*\[\s*\{\s*"type"\s*:\s*"FSP"\s*,\s*"value"\s*:\s*(\d+)',
+            r'"finalPrice"\s*:\s*\{\s*"value"\s*:\s*(\d+)'
+        ]
+        for pat in fsp_patterns:
+            f_match = re.search(pat, html, re.IGNORECASE)
+            if f_match:
+                val = next((x for x in f_match.groups() if x), None)
+                if val and int(val) > 0:
+                    extracted_price = int(val)
+                    break
+
+    # Layer 3: Schema JSON-LD (application/ld+json) -> picks the minimum (discounted) offer price
     if not extracted_price:
         json_ld_matches = re.findall(r'<script[^>]*type=["\']application/ld\+json["\'][^>]*>(.*?)</script>', html, re.DOTALL | re.IGNORECASE)
         for j_text in json_ld_matches:
             try:
                 data = json.loads(j_text.strip())
-                if isinstance(data, dict):
-                    offers = data.get("offers")
-                    if isinstance(offers, dict):
-                        p_val = offers.get("price") or offers.get("lowPrice") or offers.get("highPrice")
-                        if p_val:
-                            extracted_price = int(float(str(p_val).replace(',', '')))
-                            break
-                    elif isinstance(offers, list) and len(offers) > 0:
-                        p_val = offers[0].get("price") or offers[0].get("lowPrice")
-                        if p_val:
-                            extracted_price = int(float(str(p_val).replace(',', '')))
-                            break
-                elif isinstance(data, list):
-                    for item in data:
-                        if isinstance(item, dict) and "offers" in item:
-                            offers = item["offers"]
-                            if isinstance(offers, dict):
-                                p_val = offers.get("price") or offers.get("lowPrice")
-                                if p_val:
-                                    extracted_price = int(float(str(p_val).replace(',', '')))
-                                    break
-                    if extracted_price:
-                        break
+                candidate_prices = []
+                
+                def collect_prices(obj):
+                    if isinstance(obj, dict):
+                        if "offers" in obj:
+                            collect_prices(obj["offers"])
+                        if "price" in obj and obj["price"]:
+                            try: candidate_prices.append(int(float(str(obj["price"]).replace(',', ''))))
+                            except: pass
+                        if "lowPrice" in obj and obj["lowPrice"]:
+                            try: candidate_prices.append(int(float(str(obj["lowPrice"]).replace(',', ''))))
+                            except: pass
+                        for v in obj.values():
+                            if isinstance(v, (dict, list)):
+                                collect_prices(v)
+                    elif isinstance(obj, list):
+                        for item in obj:
+                            collect_prices(item)
+
+                collect_prices(data)
+                valid_candidates = [p for p in candidate_prices if p > 0]
+                if valid_candidates:
+                    extracted_price = min(valid_candidates)
+                    break
             except Exception:
                 pass
 
-    # Layer 3: Meta Price Tags
+    # Layer 4: OpenGraph / Meta Descriptions (Extract all candidate prices and select the discounted lowest price)
+    if not extracted_price:
+        meta_desc_matches = re.findall(r'<meta\s+(?:property|name)=["\'](?:og:description|twitter:description|description)["\']\s+content=["\'](.*?)["\']', html, re.IGNORECASE)
+        for desc in meta_desc_matches:
+            found_prices = re.findall(r'(?:rs\.?|inr|₹|price:?)\s*([\d,]+(?:\.\d{1,2})?)', desc, re.IGNORECASE)
+            parsed_prices = []
+            for fp in found_prices:
+                cl = re.sub(r'\D', '', fp)
+                if cl and int(cl) > 0:
+                    parsed_prices.append(int(cl))
+            if parsed_prices:
+                extracted_price = min(parsed_prices)
+                break
+
+    # Layer 5: Meta Price Tags
     if not extracted_price:
         price_meta = re.search(r'<meta\s+(?:itemprop|property|name)=["\'](?:price|product:price:amount|og:price:amount)["\']\s+content=["\'](.*?)["\']', html, re.IGNORECASE)
         if price_meta:
             clean_p = re.sub(r'\D', '', price_meta.group(1))
-            if clean_p and int(clean_p) > 0:
-                extracted_price = int(clean_p)
-
-    # Layer 4: Initial State / Embedded Redux Scripts
-    if not extracted_price:
-        state_matches = re.findall(r'(?:"finalPrice"|"specialPrice"|"fsp"|"price")\s*:\s*(?:\{\s*"value"\s*:\s*(\d+)|\{\s*"decimalValue"\s*:\s*(\d+)|(\d+))', html)
-        for sm in state_matches:
-            val = next((x for x in sm if x), None)
-            if val and int(val) > 0:
-                extracted_price = int(val)
-                break
-
-    # Layer 5: Flipkart Dynamic HTML Classes
-    if not extracted_price:
-        price_cls = re.search(r'(?:Nx9bqj|CxhGGd|_30jeq3|_16Jk6d|_25b18c)[^>]*>₹?\s*([\d,]+)<', html)
-        if price_cls:
-            clean_p = re.sub(r'\D', '', price_cls.group(1))
-            if clean_p and int(clean_p) > 0:
-                extracted_price = int(clean_p)
-
-    if not extracted_price:
-        generic_rupee = re.search(r'>\s*₹\s*([\d,]{3,10})\s*<', html)
-        if generic_rupee:
-            clean_p = re.sub(r'\D', '', generic_rupee.group(1))
             if clean_p and int(clean_p) > 0:
                 extracted_price = int(clean_p)
 
@@ -1376,13 +1381,16 @@ async def media_and_text_handler(update: Update, context: ContextTypes.DEFAULT_T
             
             p_title, p_price, p_image_bytes = await asyncio.to_thread(fetch_flipkart_metadata, clean_link)
             
-            # Additional fallback: parse price directly from input text/link preview caption if scraping yielded 0
+            # Additional fallback: parse price directly from input text if scraping yielded 0
             if p_price == 0:
-                p_text_match = re.search(r'(?:rs\.?|inr|₹)\s*([\d,]+)', text, re.IGNORECASE)
-                if p_text_match:
-                    clean_match = re.sub(r'\D', '', p_text_match.group(1))
-                    if clean_match and int(clean_match) > 0:
-                        p_price = int(clean_match)
+                found_user_prices = re.findall(r'(?:rs\.?|inr|₹)\s*([\d,]+)', text, re.IGNORECASE)
+                parsed_u_prices = []
+                for p in found_user_prices:
+                    cl_u = re.sub(r'\D', '', p)
+                    if cl_u and int(cl_u) > 0:
+                        parsed_u_prices.append(int(cl_u))
+                if parsed_u_prices:
+                    p_price = min(parsed_u_prices)
 
             try:
                 await status_msg.delete()
@@ -1473,7 +1481,7 @@ def main():
     app.add_handler(MessageHandler(filters.ChatType.PRIVATE & ~filters.COMMAND, media_and_text_handler))
     app.add_handler(MessageHandler(filters.ChatType.CHANNEL, channel_db_sync_handler))
 
-    print("Bot is running 24/7 with 10-Min Timer, Actual Price Engine & Rebrandly integration...")
+    print("Bot is running 24/7 with 10-Min Timer, Discounted Price Engine & Rebrandly integration...")
     app.run_polling()
 
 if __name__ == "__main__":
