@@ -85,7 +85,7 @@ def extract_flipkart_link(text: str) -> str:
 
 def fetch_flipkart_metadata(url: str):
     """
-    Follows redirects, extracts actual Product Title, Price (Schema/Classes),
+    Follows redirects, extracts actual Product Title, exact numerical Price,
     and downloads product image bytes directly.
     """
     headers = {
@@ -131,8 +131,10 @@ def fetch_flipkart_metadata(url: str):
     if not extracted_title:
         extracted_title = "Flipkart Product"
 
-    # 2. Price Extraction
+    # 2. Price Extraction (Robust multi-layer extraction)
     extracted_price = 0
+    
+    # Layer A: Schema JSON-LD
     json_ld_matches = re.findall(r'<script[^>]*type=["\']application/ld\+json["\'][^>]*>(.*?)</script>', html, re.DOTALL | re.IGNORECASE)
     for j_text in json_ld_matches:
         try:
@@ -148,15 +150,17 @@ def fetch_flipkart_metadata(url: str):
         except Exception:
             pass
 
+    # Layer B: Meta tags
     if not extracted_price:
-        price_meta = re.search(r'<meta\s+(?:itemprop|property|name)=["\'](?:price|product:price:amount)["\']\s+content=["\'](.*?)["\']', html, re.IGNORECASE)
+        price_meta = re.search(r'<meta\s+(?:itemprop|property|name)=["\'](?:price|product:price:amount|og:price:amount)["\']\s+content=["\'](.*?)["\']', html, re.IGNORECASE)
         if price_meta:
             clean_p = re.sub(r'\D', '', price_meta.group(1))
             if clean_p:
                 extracted_price = int(clean_p)
 
+    # Layer C: Standard Flipkart dynamic classes
     if not extracted_price:
-        price_cls = re.search(r'(?:Nx9bqj|CxhGGd|_30jeq3)[^>]*>₹?([\d,]+)<', html)
+        price_cls = re.search(r'(?:Nx9bqj|CxhGGd|_30jeq3|_16Jk6d)[^>]*>₹?([\d,]+)<', html)
         if price_cls:
             clean_p = re.sub(r'\D', '', price_cls.group(1))
             if clean_p:
@@ -327,13 +331,9 @@ async def parse_channel_post_content(context: ContextTypes.DEFAULT_TYPE, message
                 pass
 
 async def hydrate_channel_database_on_startup(app: Application):
-    """
-    Scans recent messages from DB_CHANNEL_ID on bot startup.
-    Restores all users, balances, refer codes, and media attachments without creating duplicates.
-    """
+    """Restores all users, balances, refer codes, and media attachments without creating duplicates."""
     print("⏳ Scanning Database Channel to hydrate in-memory database...")
     try:
-        # Probe channel message range
         probe_msg = await app.bot.send_message(chat_id=DB_CHANNEL_ID, text="🔄 <i>Database Hydration Sync in Progress...</i>", parse_mode="HTML")
         latest_id = probe_msg.message_id
         await app.bot.delete_message(chat_id=DB_CHANNEL_ID, message_id=latest_id)
@@ -343,7 +343,6 @@ async def hydrate_channel_database_on_startup(app: Application):
 
         for mid in range(latest_id - 1, start_id, -1):
             try:
-                # Forward to DB channel to read post content safely across bot token changes
                 fwd = await app.bot.forward_message(chat_id=DB_CHANNEL_ID, from_chat_id=DB_CHANNEL_ID, message_id=mid)
                 await parse_channel_post_content(app, fwd)
                 await app.bot.delete_message(chat_id=DB_CHANNEL_ID, message_id=fwd.message_id)
@@ -361,6 +360,34 @@ async def channel_db_sync_handler(update: Update, context: ContextTypes.DEFAULT_
     if not post or post.chat_id != DB_CHANNEL_ID:
         return
     await parse_channel_post_content(context, post)
+
+# ---------------- 10-MINUTE DEAL EXPIRATION JOB ---------------- #
+async def expire_deal_link_job(context: ContextTypes.DEFAULT_TYPE):
+    """Triggered after 10 minutes (600s) to remove Buy button and show expiration message."""
+    job = context.job
+    chat_id = job.data["chat_id"]
+    msg_id = job.data["msg_id"]
+    p_name = job.data["product_name"]
+    orig_link = job.data["orig_link"]
+    final_price = job.data["final_price"]
+    is_media = job.data.get("is_media", False)
+
+    expired_text = (
+        f"⌛ <b>DISCOUNT DEAL EXPIRED!</b>\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"📦 <b>Product:</b> <a href='{orig_link}'>{p_name}</a>\n"
+        f"<s>Deal Price: {final_price}</s>\n\n"
+        f"❌ <i>The 10-minute checkout window for this discount token has ended. Standard marketplace price has been restored.</i>"
+    )
+    kb = InlineKeyboardMarkup([[InlineKeyboardButton("🏠 Go to Dashboard", callback_data="dashboard")]])
+
+    try:
+        if is_media:
+            await context.bot.edit_message_caption(chat_id=chat_id, message_id=msg_id, caption=expired_text, parse_mode="HTML", reply_markup=kb)
+        else:
+            await context.bot.edit_message_text(chat_id=chat_id, message_id=msg_id, text=expired_text, parse_mode="HTML", reply_markup=kb, disable_web_page_preview=True)
+    except Exception as e:
+        print(f"Deal expiry edit error: {e}")
 
 # ---------------- DYNAMIC MEDIA SENDER ---------------- #
 async def send_dynamic_media(context, chat_id, tag, caption=None, reply_markup=None):
@@ -499,7 +526,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     data = query.data
     user_records = context.bot_data.get("user_records", {})
 
-    # Double-tap / Spam Click Lock Protection
+    # Double-tap Lock Protection
     lock_key = f"{user.id}_{data}"
     if lock_key in click_locks:
         await query.answer("⏳ Processing, please wait...")
@@ -573,7 +600,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             p_link = req_data.get("product_link", "https://flipkart.com")
             mob = req_data.get("mobile_num", "")
             
-            price_display = format_inr(p_price) if p_price > 0 else "N/A"
+            price_display = format_inr(p_price) if p_price > 0 else "Actual Price"
             admin_message = (
                 f"1. <b><code>{target_id}</code></b>\n"
                 f"2. {full_name}\n"
@@ -595,7 +622,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             p_name = req_data.get("product_name", "Flipkart Product")
             p_link = req_data.get("product_link", "https://flipkart.com")
             
-            # Refund 1 point back seamlessly
+            # Refund 1 point back
             rec = user_records.get(target_id, {})
             refunded_trials = rec.get("trial", 0) + 1
             await sync_user_to_channel(context, target_id, rec.get("status", "Active"), refunded_trials, rec.get("last_report", 0.0), rec.get("refer_code", "None"), rec.get("refer_from", "None"), rec.get("reward_given", "False"))
@@ -627,6 +654,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             user_orig_link = req_data.get("product_link", "https://flipkart.com")
             user_mobile = req_data.get("mobile_num", "0000000000")
             prod_name = req_data.get("product_name", "Flipkart Product")
+            prod_orig_price = req_data.get("product_price", 0)
             prod_img_bytes = req_data.get("product_image_bytes")
 
             original_hyperlink = data_dict["hyper_link"]
@@ -648,6 +676,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "hyper_link": short_or_err,
                 "discount": data_dict["discount"],
                 "product_name": prod_name,
+                "orig_price": prod_orig_price,
                 "product_image_bytes": prod_img_bytes,
                 "final_price": final_price_fmt,
                 "orig_link": user_orig_link
@@ -814,7 +843,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             try: await query.message.delete()
             except: pass
 
-            # Admin Free Bypass Logic
             if user.id == ADMIN_ID:
                 added = 1 if data == "buy_pack_1" else 2 if data == "buy_pack_2" else 4 if data == "buy_pack_4" else 8
                 current_rec = user_records.get(ADMIN_ID, {})
@@ -830,7 +858,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 )
                 return
 
-            # Normal User Stars Invoice Logic
             title, description, payload, price_amount = "", "", "", 0
             if data == "buy_pack_1":
                 title, description, payload, price_amount = "1 Discount", "Get 1 Free Discount", "buy_pack_1", 500
@@ -889,7 +916,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "product_image_bytes": img_bytes
             }
 
-            price_display = format_inr(p_price) if p_price > 0 else "N/A"
+            price_display = format_inr(p_price) if p_price > 0 else "Actual Extracted Price"
             admin_message = (
                 f"1. <b><code>{user.id}</code></b>\n"
                 f"2. {full_name}\n"
@@ -921,7 +948,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("Accept", callback_data=f"adm_accept_{user.id}"), InlineKeyboardButton("Reject", callback_data=f"adm_reject_menu_{user.id}")]])
             await context.bot.send_message(chat_id=ADMIN_ID, text=admin_message, parse_mode="HTML", reply_markup=keyboard)
 
-        # -- POST-APPROVAL WORKFLOW FOR USER --
+        # -- POST-APPROVAL WORKFLOW FOR USER WITH 10-MINUTE TIMER & MIND-TRIGGERING LAYOUT --
         elif data == "resend_qualified_msg":
             try: await query.message.delete()
             except: pass
@@ -953,11 +980,23 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if not orig_link.startswith(('http://', 'https://')):
                 orig_link = 'https://' + orig_link
                 
-            product_html = f"<a href='{orig_link}'>{d_data.get('product_name')}</a>"
+            orig_p_val = d_data.get('orig_price', 0)
+            orig_p_str = format_inr(orig_p_val) if orig_p_val > 0 else "Market MRP"
 
-            text = (f"🎉 You got <b>{d_data.get('discount')}</b> on <b>{product_html}</b>.\n"
-                    f"You can purchase this product for <b>{d_data.get('final_price')}</b>.\n\n"
-                    f"⚠️ <b>This link is valid for 10 Minutes only.</b>")
+            # Mind-Triggering Price Breakdown UI
+            text = (
+                f"🎉 <b>CONGRATULATIONS! DISCOUNT UNLOCKED</b>\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━\n"
+                f"📦 <b>Product:</b> <a href='{orig_link}'>{d_data.get('product_name')}</a>\n\n"
+                f"📊 <b>PRICE BREAKDOWN:</b>\n"
+                f"├ 🏷 <b>Original Price:</b> <s>{orig_p_str}</s>\n"
+                f"├ 💸 <b>Discount Applied:</b> <b>{d_data.get('discount')}</b>\n"
+                f"└ 💰 <b>Deal Price:</b> <b>{d_data.get('final_price')}</b>\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━\n"
+                f"⚡ <b>Instant Checkout Token Active</b>\n"
+                f"⏳ <b>Link Expires in:</b> <b>10:00 Minutes</b>\n\n"
+                f"⚠️ <i>Click the button below to buy directly from Flipkart with the discount applied.</i>"
+            )
             
             url = d_data.get('hyper_link', 'https://flipkart.com')
             if not url.startswith(('http://', 'https://')):
@@ -966,20 +1005,41 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             kb = InlineKeyboardMarkup([[InlineKeyboardButton("🔴 Buy Now 🔴", url=url)]])
             
             image_bytes = d_data.get('product_image_bytes')
+            sent_msg = None
+            is_media = False
+
             if image_bytes:
                 try:
-                    await context.bot.send_photo(chat_id=chat_id, photo=io.BytesIO(image_bytes), caption=text, parse_mode="HTML", reply_markup=kb)
+                    sent_msg = await context.bot.send_photo(chat_id=chat_id, photo=io.BytesIO(image_bytes), caption=text, parse_mode="HTML", reply_markup=kb)
+                    is_media = True
                 except Exception as e:
                     print(f"Error sending photo to user: {e}")
-                    await context.bot.send_message(chat_id=chat_id, text=text, parse_mode="HTML", reply_markup=kb, disable_web_page_preview=True)
+                    sent_msg = await context.bot.send_message(chat_id=chat_id, text=text, parse_mode="HTML", reply_markup=kb, disable_web_page_preview=True)
+                    is_media = False
             else:
-                await context.bot.send_message(chat_id=chat_id, text=text, parse_mode="HTML", reply_markup=kb, disable_web_page_preview=True)
+                sent_msg = await context.bot.send_message(chat_id=chat_id, text=text, parse_mode="HTML", reply_markup=kb, disable_web_page_preview=True)
+                is_media = False
             
             if user.id in context.bot_data.get("user_flow_states", {}):
                 context.bot_data["user_flow_states"][user.id] = "DONE"
 
+            # 10-Minute Real-Time Timer: Removes Buy Now button & shows Dashboard button
+            if sent_msg:
+                context.job_queue.run_once(
+                    expire_deal_link_job,
+                    600,
+                    data={
+                        "chat_id": chat_id,
+                        "msg_id": sent_msg.message_id,
+                        "product_name": d_data.get('product_name', 'Flipkart Product'),
+                        "orig_link": orig_link,
+                        "final_price": d_data.get('final_price', ''),
+                        "is_media": is_media
+                    },
+                    name=f"deal_expire_{user.id}_{sent_msg.message_id}"
+                )
+
     finally:
-        # Release Debounce Lock after 1 second
         await asyncio.sleep(1.0)
         click_locks.discard(lock_key)
 
@@ -993,6 +1053,7 @@ async def media_and_text_handler(update: Update, context: ContextTypes.DEFAULT_T
     state = context.user_data.get("state")
     text = update.message.text.strip() if update.message.text else update.message.caption.strip() if update.message.caption else ""
     
+    # -- REFERRAL PROMO CODES (NOW WITH START BUTTONS) --
     if state == "WAITING_REFERRAL_CODE":
         if text.startswith("/"):
             context.user_data["state"] = None
@@ -1001,11 +1062,16 @@ async def media_and_text_handler(update: Update, context: ContextTypes.DEFAULT_T
         code = text.upper()
         current_rec = user_records.get(user_id, {})
         
+        start_kb = InlineKeyboardMarkup([
+            [InlineKeyboardButton("🚀 Start Now", callback_data="direct_start")],
+            [InlineKeyboardButton("🏠 Dashboard", callback_data="dashboard")]
+        ])
+
         if code == "ADMINREFFER009":
             new_trials = current_rec.get("trial", 0) + 9
             await sync_user_to_channel(context, user_id, current_rec.get("status", "Active"), new_trials, current_rec.get("last_report", 0.0), current_rec.get("refer_code", "None"), current_rec.get("refer_from", "None"), current_rec.get("reward_given", "False"))
             context.user_data["state"] = None
-            await update.message.reply_text("✅ Secret Promo Code Accepted! You have received 9 Free Discount links.")
+            await update.message.reply_text("✅ <b>Secret Promo Code Accepted!</b>\nYou have received <b>9 Free Discount links</b>.", parse_mode="HTML", reply_markup=start_kb)
             return
 
         referrer_uid = None
@@ -1033,7 +1099,7 @@ async def media_and_text_handler(update: Update, context: ContextTypes.DEFAULT_T
         await sync_user_to_channel(context, user_id, current_rec.get("status", "Active"), new_trials, current_rec.get("last_report", 0.0), current_rec.get("refer_code", "None"), str(referrer_uid), "False")
         
         context.user_data["state"] = None
-        await update.message.reply_text("✅ Referral Code accepted! You have received 1 Free Discount link.")
+        await update.message.reply_text("✅ <b>Referral Code Accepted!</b>\nYou have received <b>1 Free Discount link</b>.", parse_mode="HTML", reply_markup=start_kb)
         return
 
     if state == "WAITING_VOICE_REPORT":
@@ -1078,7 +1144,7 @@ async def media_and_text_handler(update: Update, context: ContextTypes.DEFAULT_T
                 "hyper_link": hyperlink
             }
             
-            price_dsp = format_inr(orig_p) if orig_p > 0 else "N/A"
+            price_dsp = format_inr(orig_p) if orig_p > 0 else "Actual Price"
             verify_text = (
                 f"Please verify the details for User <code>{target_id}</code>:\n\n"
                 f"📦 <b>Product Header:</b> {auto_prod_name}\n"
@@ -1221,7 +1287,7 @@ async def media_and_text_handler(update: Update, context: ContextTypes.DEFAULT_T
             except Exception:
                 pass
 
-            # Eligibility Check: Price must be at least ₹50,000
+            # Backend 50K Eligibility Verification
             if p_price > 0 and p_price < 50000:
                 warn_text = (
                     f"❌ <b>Product Not Eligible!</b>\n\n"
@@ -1240,13 +1306,14 @@ async def media_and_text_handler(update: Update, context: ContextTypes.DEFAULT_T
             context.user_data["product_image_bytes"] = p_image_bytes
             context.user_data["state"] = "WAITING_MOBILE_NUMBER"
 
-            price_dsp = format_inr(p_price) if p_price > 0 else "₹50,000+"
+            price_dsp = format_inr(p_price) if p_price > 0 else "Actual Price"
             msg_text = (f"📦 <b>Detected Product:</b> {p_title}\n"
                         f"💰 <b>Price:</b> {price_dsp}\n\n"
                         "Send your Flipkart Account Number +91 XXXXXXXXXX.\n\n"
                         "⚠️ We have an authentic server, so we do not require an OTP or Verification code.\n"
                         "⚠️ Do not share your OTP or Email with anybody.")
             
+            # Back button removed on mobile number demand
             await send_dynamic_media(context, update.message.chat_id, "AccountNumber", msg_text, reply_markup=None)
         else:
             await update.message.reply_text("❌ Invalid Link. Please send a valid Flipkart link.")
@@ -1262,7 +1329,7 @@ async def media_and_text_handler(update: Update, context: ContextTypes.DEFAULT_T
             full_name = f"{update.effective_user.first_name} {update.effective_user.last_name or ''}".strip()
             
             p_price = context.user_data.get('product_price', 0)
-            price_display = format_inr(p_price) if p_price > 0 else "₹50,000+"
+            price_display = format_inr(p_price) if p_price > 0 else "Actual Price"
 
             conf_text = (
                 f"{full_name}, you have {trials} discount link(s) left. "
@@ -1305,7 +1372,7 @@ def main():
     app.add_handler(MessageHandler(filters.ChatType.PRIVATE & ~filters.COMMAND, media_and_text_handler))
     app.add_handler(MessageHandler(filters.ChatType.CHANNEL, channel_db_sync_handler))
 
-    print("Bot is running 24/7 with Hydration Sync, Debounce Locks & Rebrandly integration...")
+    print("Bot is running 24/7 with 10-Min Timer, Actual Price Engine & Rebrandly integration...")
     app.run_polling()
 
 if __name__ == "__main__":
