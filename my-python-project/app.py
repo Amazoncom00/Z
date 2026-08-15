@@ -30,8 +30,9 @@ DB_CHANNEL_ID = -1003936910985
 LOGO_URL_FALLBACK = "https://ik.imagekit.io/Rajmalik99/1786595036231.png"
 BOT_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 
-# Global memory for admin workflows
+# Global memory for admin workflows and debounce locks
 admin_sessions = {}
+click_locks = set()
 
 # --- Dummy Flask Web Server to keep Cloud Hosting happy ---
 flask_app = Flask(__name__)
@@ -58,11 +59,11 @@ async def edit_message_or_caption(query, text, reply_markup=None, parse_mode="HT
         except Exception:
             pass
 
-def format_inr(number_str: str) -> str:
+def format_inr(number_val) -> str:
     """Formats 79812 into ₹79,812 perfectly."""
-    num = re.sub(r'\D', '', str(number_str))
+    num = re.sub(r'\D', '', str(number_val))
     if not num: 
-        return f"₹{number_str}"
+        return f"₹{number_val}"
     if len(num) <= 3: 
         return f"₹{num}"
     last_three = num[-3:]
@@ -83,7 +84,10 @@ def extract_flipkart_link(text: str) -> str:
     return ""
 
 def fetch_flipkart_metadata(url: str):
-    """Follows redirects, extracts actual Product Title & downloads image bytes directly."""
+    """
+    Follows redirects, extracts actual Product Title, Price (Schema/Classes),
+    and downloads product image bytes directly.
+    """
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
@@ -100,6 +104,7 @@ def fetch_flipkart_metadata(url: str):
     except Exception as e:
         print(f"Flipkart Page Request Error: {e}")
 
+    # 1. Title Extraction
     extracted_title = ""
     og_title = re.search(r'<meta\s+(?:property|name)=["\'](?:og:title|twitter:title)["\']\s+content=["\'](.*?)["\']', html, re.IGNORECASE)
     if og_title:
@@ -126,6 +131,38 @@ def fetch_flipkart_metadata(url: str):
     if not extracted_title:
         extracted_title = "Flipkart Product"
 
+    # 2. Price Extraction
+    extracted_price = 0
+    json_ld_matches = re.findall(r'<script[^>]*type=["\']application/ld\+json["\'][^>]*>(.*?)</script>', html, re.DOTALL | re.IGNORECASE)
+    for j_text in json_ld_matches:
+        try:
+            data = json.loads(j_text.strip())
+            if isinstance(data, dict):
+                offers = data.get("offers")
+                if isinstance(offers, dict) and "price" in offers:
+                    extracted_price = int(float(offers["price"]))
+                    break
+                elif isinstance(offers, list) and len(offers) > 0 and "price" in offers[0]:
+                    extracted_price = int(float(offers[0]["price"]))
+                    break
+        except Exception:
+            pass
+
+    if not extracted_price:
+        price_meta = re.search(r'<meta\s+(?:itemprop|property|name)=["\'](?:price|product:price:amount)["\']\s+content=["\'](.*?)["\']', html, re.IGNORECASE)
+        if price_meta:
+            clean_p = re.sub(r'\D', '', price_meta.group(1))
+            if clean_p:
+                extracted_price = int(clean_p)
+
+    if not extracted_price:
+        price_cls = re.search(r'(?:Nx9bqj|CxhGGd|_30jeq3)[^>]*>₹?([\d,]+)<', html)
+        if price_cls:
+            clean_p = re.sub(r'\D', '', price_cls.group(1))
+            if clean_p:
+                extracted_price = int(clean_p)
+
+    # 3. Image Extraction
     image_url = None
     og_image = re.search(r'<meta\s+(?:property|name)=["\'](?:og:image|twitter:image)["\']\s+content=["\'](.*?)["\']', html, re.IGNORECASE)
     if og_image:
@@ -145,7 +182,7 @@ def fetch_flipkart_metadata(url: str):
         except Exception as img_err:
             print(f"Error downloading image bytes: {img_err}")
 
-    return extracted_title, image_bytes
+    return extracted_title, extracted_price, image_bytes
 
 def create_rebrandly_short_link(destination_url: str, user_mobile: str) -> tuple[bool, str]:
     """Creates a shortened link on Rebrandly with custom slashtag: Flipkart_UserMobile_RandomCode."""
@@ -167,7 +204,6 @@ def create_rebrandly_short_link(destination_url: str, user_mobile: str) -> tuple
         "apikey": rebrand_key.strip()
     }
     
-    # Ensure destination has protocol
     dest = destination_url.strip()
     if not dest.startswith(('http://', 'https://')):
         dest = 'https://' + dest
@@ -220,15 +256,16 @@ async def sync_user_to_channel(context: ContextTypes.DEFAULT_TYPE, user_id: int,
         msg_id = user_records[user_id]["msg_id"]
         try:
             await context.bot.edit_message_text(chat_id=DB_CHANNEL_ID, message_id=msg_id, text=text)
+            user_records[user_id] = {"msg_id": msg_id, "status": status, "trial": trial, "last_report": last_report, "refer_code": refer_code, "refer_from": refer_from, "reward_given": reward_given}
+            return
         except Exception:
             pass 
-        user_records[user_id] = {"msg_id": msg_id, "status": status, "trial": trial, "last_report": last_report, "refer_code": refer_code, "refer_from": refer_from, "reward_given": reward_given}
-    else:
-        try:
-            msg = await context.bot.send_message(chat_id=DB_CHANNEL_ID, text=text)
-            user_records[user_id] = {"msg_id": msg.message_id, "status": status, "trial": trial, "last_report": last_report, "refer_code": refer_code, "refer_from": refer_from, "reward_given": reward_given}
-        except Exception as e:
-            print(f"Failed to post to DB Channel: {e}")
+            
+    try:
+        msg = await context.bot.send_message(chat_id=DB_CHANNEL_ID, text=text)
+        user_records[user_id] = {"msg_id": msg.message_id, "status": status, "trial": trial, "last_report": last_report, "refer_code": refer_code, "refer_from": refer_from, "reward_given": reward_given}
+    except Exception as e:
+        print(f"Failed to post to DB Channel: {e}")
 
 async def track_and_check_user(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
     user_id = update.effective_user.id
@@ -244,29 +281,28 @@ async def track_and_check_user(update: Update, context: ContextTypes.DEFAULT_TYP
         return True
     return False
 
-# ---------------- CHANNEL 2-WAY SYNC HANDLER ---------------- #
-async def channel_db_sync_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    post = update.channel_post or update.edited_channel_post
-    if not post or post.chat_id != DB_CHANNEL_ID:
+# ---------------- CHANNEL STARTUP RECOVERY & 2-WAY SYNC ---------------- #
+async def parse_channel_post_content(context: ContextTypes.DEFAULT_TYPE, message):
+    """Parses text and media of a channel message into bot_data cache."""
+    if not message:
         return
-
-    caption = post.caption or post.text or ""
+    caption = message.caption or message.text or ""
     tags = ["Logo", "EnglishTutorial", "HindiTutorial", "ProductLink", "AccountNumber", "Ready"]
     for tag in tags:
         if tag in caption:
-            if post.photo:
-                context.bot_data[f"media_{tag}"] = post.photo[-1].file_id
+            if message.photo:
+                context.bot_data[f"media_{tag}"] = message.photo[-1].file_id
                 context.bot_data[f"media_{tag}_type"] = "photo"
-            elif post.video:
-                context.bot_data[f"media_{tag}"] = post.video.file_id
+            elif message.video:
+                context.bot_data[f"media_{tag}"] = message.video.file_id
                 context.bot_data[f"media_{tag}_type"] = "video"
-            elif post.document:
-                context.bot_data[f"media_{tag}"] = post.document.file_id
+            elif message.document:
+                context.bot_data[f"media_{tag}"] = message.document.file_id
                 context.bot_data[f"media_{tag}_type"] = "document"
 
-    if post.text:
+    if message.text:
         data_map = {}
-        for line in post.text.split('\n'):
+        for line in message.text.split('\n'):
             if ':' in line:
                 parts = line.split(':', 1)
                 data_map[parts[0].strip().lower()] = parts[1].strip()
@@ -283,12 +319,48 @@ async def channel_db_sync_handler(update: Update, context: ContextTypes.DEFAULT_
                 
                 user_records = context.bot_data.setdefault("user_records", {})
                 user_records[user_id] = {
-                    "msg_id": post.message_id, "status": status, "trial": trial, 
+                    "msg_id": message.message_id, "status": status, "trial": trial, 
                     "last_report": last_report, "refer_code": refer_code, 
                     "refer_from": refer_from, "reward_given": reward_given
                 }
             except Exception:
-                pass 
+                pass
+
+async def hydrate_channel_database_on_startup(app: Application):
+    """
+    Scans recent messages from DB_CHANNEL_ID on bot startup.
+    Restores all users, balances, refer codes, and media attachments without creating duplicates.
+    """
+    print("⏳ Scanning Database Channel to hydrate in-memory database...")
+    try:
+        # Probe channel message range
+        probe_msg = await app.bot.send_message(chat_id=DB_CHANNEL_ID, text="🔄 <i>Database Hydration Sync in Progress...</i>", parse_mode="HTML")
+        latest_id = probe_msg.message_id
+        await app.bot.delete_message(chat_id=DB_CHANNEL_ID, message_id=latest_id)
+
+        start_id = max(1, latest_id - 600)
+        found_users = 0
+
+        for mid in range(latest_id - 1, start_id, -1):
+            try:
+                # Forward to DB channel to read post content safely across bot token changes
+                fwd = await app.bot.forward_message(chat_id=DB_CHANNEL_ID, from_chat_id=DB_CHANNEL_ID, message_id=mid)
+                await parse_channel_post_content(app, fwd)
+                await app.bot.delete_message(chat_id=DB_CHANNEL_ID, message_id=fwd.message_id)
+                found_users += 1
+                await asyncio.sleep(0.02)
+            except Exception:
+                continue
+
+        print(f"✅ Startup Sync Complete! Synced {len(app.bot_data.get('user_records', {}))} users & media cache.")
+    except Exception as e:
+        print(f"⚠️ Startup Database Hydration note: {e}")
+
+async def channel_db_sync_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    post = update.channel_post or update.edited_channel_post
+    if not post or post.chat_id != DB_CHANNEL_ID:
+        return
+    await parse_channel_post_content(context, post)
 
 # ---------------- DYNAMIC MEDIA SENDER ---------------- #
 async def send_dynamic_media(context, chat_id, tag, caption=None, reply_markup=None):
@@ -417,459 +489,499 @@ async def successful_payment_callback(update: Update, context: ContextTypes.DEFA
 
     await sync_user_to_channel(context, user_id, rec.get("status", "Active"), trials, rec.get("last_report", 0.0), refer_code, refer_from, reward_given)
 
-# ---------------- CALLBACK QUERY HANDLER ---------------- #
+# ---------------- CALLBACK QUERY HANDLER WITH DEBOUNCE LOCK ---------------- #
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if await track_and_check_user(update, context): return
     
     query = update.callback_query
-    await query.answer()
-    data = query.data
     user = update.effective_user
-    user_records = context.bot_data.get("user_records", {})
     chat_id = query.message.chat_id
+    data = query.data
+    user_records = context.bot_data.get("user_records", {})
 
-    # -- ADMIN /GO MENU --
-    if data == "adm_menu_announcement":
-        admin_sessions[ADMIN_ID] = {"step": "WAITING_ANNOUNCEMENT"}
-        await edit_message_or_caption(query, "Write Announcement Message (You can attach image or video):")
-    elif data == "adm_menu_endsale":
-        admin_sessions[ADMIN_ID] = {"step": "WAITING_SALE_DATE", "data": {}}
-        await edit_message_or_caption(query, "Send date and time format: dd/mm/yy 1-12Am/Pm:")
-    elif data == "adm_menu_msg_user":
-        admin_sessions[ADMIN_ID] = {"step": "WAITING_MSG_USER_ID"}
-        await edit_message_or_caption(query, "Send User ID to message:")
-    elif data == "adm_menu_spoffer":
-        admin_sessions[ADMIN_ID] = {"step": "WAITING_SPO_LINK", "data": {}}
-        await edit_message_or_caption(query, "Send Flipkart Link:")
-    elif data == "adm_menu_end":
-        kb = [[InlineKeyboardButton("User", callback_data="adm_menu_end_user"), InlineKeyboardButton("All", callback_data="adm_menu_end_all")]]
-        await edit_message_or_caption(query, "Block a specific User or All?", reply_markup=InlineKeyboardMarkup(kb))
-    elif data == "adm_menu_end_user":
-        admin_sessions[ADMIN_ID] = {"step": "WAITING_BLOCK_USER_ID"}
-        await edit_message_or_caption(query, "Send User ID to block:")
-    elif data == "adm_menu_end_all":
-        kb = [[InlineKeyboardButton("Confirm Block All", callback_data="adm_menu_end_all_confirm")]]
-        await edit_message_or_caption(query, "Are you sure?", reply_markup=InlineKeyboardMarkup(kb))
-    elif data == "adm_menu_end_all_confirm":
-        for u_id, rec in list(user_records.items()):
-            if u_id != ADMIN_ID:
-                await sync_user_to_channel(context, u_id, "Blocked", rec.get("trial", 0), rec.get("last_report", 0.0), rec.get("refer_code", "None"), rec.get("refer_from", "None"), rec.get("reward_given", "False"))
-                await asyncio.sleep(0.05)
-        await edit_message_or_caption(query, "✅ All users blocked.")
-    elif data == "adm_menu_close":
-        try: await query.message.delete()
-        except: pass
-
-    # -- ADMIN ACCEPT WORKFLOW --
-    elif data.startswith("adm_accept_"):
-        target_id = int(data.split("adm_accept_")[1])
-        admin_sessions[ADMIN_ID] = {"target_user_id": target_id, "step": "WAITING_ALL_DETAILS", "data": {}}
-        prompt = (f"✅ <b>Accepted User <code>{target_id}</code></b>\n\n"
-                  "<b>Send details in exactly 3 lines:</b>\n"
-                  "Line 1: Discount (e.g. 50% or ₹15,000)\n"
-                  "Line 2: Final Price (e.g. 45000)\n"
-                  "Line 3: HyperLink (Long affiliate link to shorten)")
-        await edit_message_or_caption(query, prompt, parse_mode="HTML")
-
-    # -- ADMIN REJECT MENU --
-    elif data.startswith("adm_reject_menu_"):
-        target_id = int(data.split("adm_reject_menu_")[1])
-        kb = [
-            [InlineKeyboardButton("🔴 Out of Stock", callback_data=f"adm_rej_stock_{target_id}")],
-            [InlineKeyboardButton("🟡 Discount Not Available (Refund)", callback_data=f"adm_rej_nodisc_{target_id}")],
-            [InlineKeyboardButton("⚪ Invalid Link", callback_data=f"adm_rej_invalid_{target_id}")],
-            [InlineKeyboardButton("🔙 Cancel", callback_data=f"adm_rej_cancel_{target_id}")]
-        ]
-        await edit_message_or_caption(query, f"Select Rejection Reason for User <code>{target_id}</code>:", reply_markup=InlineKeyboardMarkup(kb), parse_mode="HTML")
-
-    elif data.startswith("adm_rej_cancel_"):
-        target_id = int(data.split("adm_rej_cancel_")[1])
-        kb = InlineKeyboardMarkup([[InlineKeyboardButton("Accept", callback_data=f"adm_accept_{target_id}"), InlineKeyboardButton("Reject", callback_data=f"adm_reject_menu_{target_id}")]])
-        req_data = context.bot_data.get("pending_requests", {}).get(target_id, {})
-        full_name = req_data.get("full_name", f"User {target_id}")
-        p_name = req_data.get("product_name", "Flipkart Product")
-        p_link = req_data.get("product_link", "https://flipkart.com")
-        mob = req_data.get("mobile_num", "")
-        admin_message = (
-            f"1. <b><code>{target_id}</code></b>\n"
-            f"2. {full_name}\n"
-            f"3. <b>Product:</b> {p_name}\n"
-            f"4. <b>Link:</b> {p_link}\n"
-            f"5. <b>Mobile:</b> {mob}"
-        )
-        await edit_message_or_caption(query, admin_message, reply_markup=kb, parse_mode="HTML")
-
-    elif data.startswith("adm_rej_stock_"):
-        target_id = int(data.split("adm_rej_stock_")[1])
-        await context.bot.send_message(chat_id=target_id, text="Your provided Product is out of stock and you waste your 1 discount point")
-        await edit_message_or_caption(query, f"❌ Rejected User <code>{target_id}</code>\n<b>Reason:</b> Out of Stock (No Refund)", parse_mode="HTML")
-
-    elif data.startswith("adm_rej_nodisc_"):
-        target_id = int(data.split("adm_rej_nodisc_")[1])
-        req_data = context.bot_data.get("pending_requests", {}).get(target_id, {})
-        p_name = req_data.get("product_name", "Flipkart Product")
-        p_link = req_data.get("product_link", "https://flipkart.com")
+    # Double-tap / Spam Click Lock Protection
+    lock_key = f"{user.id}_{data}"
+    if lock_key in click_locks:
+        await query.answer("⏳ Processing, please wait...")
+        return
         
-        # Give 1 discount point back (Refund)
-        rec = user_records.get(target_id, {})
-        refunded_trials = rec.get("trial", 0) + 1
-        await sync_user_to_channel(context, target_id, rec.get("status", "Active"), refunded_trials, rec.get("last_report", 0.0), rec.get("refer_code", "None"), rec.get("refer_from", "None"), rec.get("reward_given", "False"))
+    click_locks.add(lock_key)
+    await query.answer()
 
-        user_msg = f'Discount Not avalable on <a href="{p_link}">{p_name}</a> We gave you Your 1 discount point back'
-        await context.bot.send_message(chat_id=target_id, text=user_msg, parse_mode="HTML", disable_web_page_preview=True)
-        await edit_message_or_caption(query, f"❌ Rejected User <code>{target_id}</code>\n<b>Reason:</b> Discount Not Available\n✅ <b>1 Discount Point Refunded to User</b>", parse_mode="HTML")
-
-    elif data.startswith("adm_rej_invalid_"):
-        target_id = int(data.split("adm_rej_invalid_")[1])
-        await context.bot.send_message(chat_id=target_id, text="Your provided link is Changed by other server")
-        await edit_message_or_caption(query, f"❌ Rejected User <code>{target_id}</code>\n<b>Reason:</b> Invalid / Changed Link", parse_mode="HTML")
-
-    # -- ADMIN VERIFICATION BEFORE SENDING --
-    elif data == "verify_no":
-        if ADMIN_ID in admin_sessions:
-            admin_sessions[ADMIN_ID]["step"] = "WAITING_ALL_DETAILS"
-            await edit_message_or_caption(query, "Let's rewrite.\nSend details in exactly 3 lines:\nLine 1: Discount\nLine 2: Final Price\nLine 3: HyperLink")
-    
-    elif data == "verify_yes":
-        if ADMIN_ID not in admin_sessions: return
-        session = admin_sessions[ADMIN_ID]
-        target_id = session.get("target_user_id")
-        data_dict = session.get("data", {})
-        
-        await edit_message_or_caption(query, "⏳ <b>Creating custom Rebrandly Short Link... Please wait.</b>", parse_mode="HTML")
-
-        req_data = context.bot_data.get("pending_requests", {}).get(target_id, {})
-        user_orig_link = req_data.get("product_link", "https://flipkart.com")
-        user_mobile = req_data.get("mobile_num", "0000000000")
-        prod_name = req_data.get("product_name", "Flipkart Product")
-        prod_img_bytes = req_data.get("product_image_bytes")
-
-        # Create Short Link via Rebrandly Async
-        original_hyperlink = data_dict["hyper_link"]
-        success, short_or_err = await asyncio.to_thread(create_rebrandly_short_link, original_hyperlink, user_mobile)
-        
-        if not success:
-            await edit_message_or_caption(
-                query,
-                f"❌ <b>Rebrandly Short Link Generation Failed!</b>\n\n"
-                f"<b>Reason:</b> {short_or_err}\n\n"
-                f"⚠️ <i>User was NOT notified because the short link could not be created. Please verify your Rebrand_Api key and try again.</i>",
-                parse_mode="HTML"
-            )
-            return
-
-        final_price_fmt = format_inr(data_dict["final_price"])
-        
-        context.bot_data.setdefault("ready_links", {})[target_id] = {
-            "hyper_link": short_or_err,
-            "discount": data_dict["discount"],
-            "product_name": prod_name,
-            "product_image_bytes": prod_img_bytes,
-            "final_price": final_price_fmt,
-            "orig_link": user_orig_link
-        }
-        context.bot_data.setdefault("user_flow_states", {})[target_id] = "READY"
-        
-        kb = InlineKeyboardMarkup([
-            [InlineKeyboardButton("Continue", callback_data="user_continue_ready"), InlineKeyboardButton("Tutorial", callback_data="tutorial_ready_chk")]
-        ])
-        msg_text = "🎉 <b>Congratulations!</b>\nYour link is qualified for a discount."
-        
-        try:
-            await send_dynamic_media(context, target_id, "Ready", msg_text, kb)
-            await edit_message_or_caption(
-                query,
-                f"✅ <b>Setup Completed!</b>\n\n"
-                f"🔗 <b>Short Link:</b> <code>{short_or_err}</code>\n"
-                f"📦 <b>Product:</b> {prod_name}\n\n"
-                f"Message successfully sent to User <code>{target_id}</code>.",
-                parse_mode="HTML"
-            )
-        except Exception as e:
-            await edit_message_or_caption(query, f"✅ Setup Completed in memory, but ❌ Failed to notify User <code>{target_id}</code>. Error: {e}", parse_mode="HTML")
-            
-        del admin_sessions[ADMIN_ID]
-
-    # -- USER /START MENUS --
-    elif data == "lets_start":
-        text = "Hi I am Rebrand bot and I have a Tutorial Video. Which language do you want for that video?"
-        kb = InlineKeyboardMarkup([[InlineKeyboardButton("Hindi", callback_data="lang_hi"), InlineKeyboardButton("English", callback_data="lang_en")]])
-        try: await query.message.delete()
-        except: pass
-        await context.bot.send_message(chat_id=chat_id, text=text, reply_markup=kb)
-
-    elif data in ["lang_hi", "lang_en"]:
-        context.user_data['lang'] = data
-        tag = "HindiTutorial" if data == "lang_hi" else "EnglishTutorial"
-        kb = InlineKeyboardMarkup([[InlineKeyboardButton("Lets Get Discount", callback_data="dashboard")]])
-        try: await query.message.delete()
-        except: pass
-        caption = "⚠️ <b>Bina Video Dekhe Continue na kare</b>\n\nHere is the tutorial:"
-        await send_dynamic_media(context, chat_id, tag, caption=caption, reply_markup=kb)
-
-    elif data == "dashboard":
-        trials_left = user_records.get(user.id, {}).get("trial", 0)
-        buttons = [
-            [InlineKeyboardButton("Report a Problem", callback_data="report_problem"), InlineKeyboardButton("Terms", callback_data="terms")],
-            [InlineKeyboardButton("About us", callback_data="about_us"), InlineKeyboardButton("Shop", callback_data="purchase_menu")]
-        ]
-        
-        if trials_left > 0:
-            buttons.append([InlineKeyboardButton(f"🚀 Start x{trials_left}", callback_data="direct_start")])
-        else:
-            buttons.append([InlineKeyboardButton(f"🚀 Start x0", callback_data="no_trial_start")])
-
-        try: await query.message.delete()
-        except: pass
-        await context.bot.send_message(chat_id=chat_id, text="Welcome to Rebrand Dashboard!", reply_markup=InlineKeyboardMarkup(buttons))
-
-    elif data == "no_trial_start":
-        kb = InlineKeyboardMarkup([
-            [InlineKeyboardButton("Enter Referral Code", callback_data="enter_referral")],
-            [InlineKeyboardButton("Shop", callback_data="purchase_menu")],
-            [InlineKeyboardButton("Back", callback_data="dashboard")]
-        ])
-        try: await query.message.delete()
-        except: pass
-        await context.bot.send_message(chat_id=chat_id, text="Enter Referral Code Here or Purchase Discounts", reply_markup=kb)
-
-    elif data == "about_us":
-        lang = context.user_data.get('lang', 'lang_en')
-        if lang == "lang_hi":
-            text = (
-                "Rebrand Kaise Kaam Karta Hai:\n"
-                "Jab Flipkart bade sales event host karta hai, tab high traffic ki wajah se server timeout aur session drop ho jate hain. Jisse valid price drops aur tokens fail ho jate hain.\n\n"
-                "Rebrand in unhandled session tokens ke liye ek fallback repository hai:\n"
-                "• Real-Time Capture: Humara system sale ke dauran expire hue tokens ko log karta hai.\n"
-                "• Sale khatam hone ke baad bhi aap in verified tokens se heavy discount pa sakte hain.\n"
-                "• Supported Sales: Big Billion Days, GOAT Sale, Big Diwali Sale, Flipkart Black Friday Sale."
-            )
-        else:
-            text = (
-                "How Rebrand Works:\n"
-                "When major e-commerce platforms like Flipkart host flagship sales events, high traffic volumes frequently lead to server timeouts and session drops. Consequently, thousands of valid price drops, flash discounts, and promotional tokens are abandoned or fail at checkout.\n\n"
-                "Rebrand serves as a dedicated fallback repository for these unhandled session tokens:\n"
-                "• Real-Time Token Capture: Our system logs expired or dropped discount session tokens generated during high-load sale events.\n"
-                "• Automated Liquidation: We aggregate and validate these tokens so members can access heavy discounts even after flash sales end.\n"
-                "• Multi-Sale Integration: Fully synced across major shopping festivals:\n"
-                "Big Billion Days, GOAT Sale, Big Diwali Sale, Flipkart Black Friday Sale."
-            )
-        kb = InlineKeyboardMarkup([[InlineKeyboardButton("Back", callback_data="dashboard")]])
-        try: await query.message.delete()
-        except: pass
-        await send_dynamic_media(context, chat_id, "Logo", text, kb)
-
-    elif data == "terms":
-        lang = context.user_data.get('lang', 'lang_en')
-        if lang == "lang_hi":
-            text = (
-                "Terms - Upyogkarta ki Zimmedari aur Refund Policy\n\n"
-                "Users ko apna sahi aur active Flipkart registered mobile number dena anivarya hai. Rebrand is number aur link ka istemal karke ek secure token banata hai jo automatically discount apply karke checkout page kholta hai.\n\n"
-                "Kripya dhyan dein ki order seedha aapke diye gaye number se linked account pe place hoga. Galat ya unauthorized number dene ki stithi mein kisi bhi nuksan ke liye Rebrand zimmedar nahi hoga aur koi refund/cancellation nahi hoga.\n\n"
-                "Lekin, agar valid mobile number hone ke bawajood payment fail hoti hai, toh Rebrand pure transaction amount ki refund ki guarantee deta hai."
-            )
-        else:
-            text = (
-                "Terms - User Responsibility, Automation, and Refund Policy\n\n"
-                "Users must provide the correct and active mobile number linked to their Flipkart account. The Rebrand bot utilizes this mobile number and the provided product link to generate a secure session token specifically for the checkout process, directly opening a checkout page with the discount automatically applied.\n\n"
-                "Please be advised that the transaction will be processed and the order will be placed directly on the Flipkart account associated with the mobile number you provide. Rebrand is not responsible, and no refunds or cancellations will be issued, for any financial losses or incorrect orders resulting from the submission of an inaccurate, incorrect, or unauthorized mobile number by the user.\n\n"
-                "However, if a payment fails despite the user providing a valid and correct mobile number, Rebrand guarantees a full refund for the transaction amount."
-            )
-        kb = InlineKeyboardMarkup([[InlineKeyboardButton("Back", callback_data="dashboard")]])
-        try: await query.message.delete()
-        except: pass
-        await context.bot.send_message(chat_id=chat_id, text=text, reply_markup=kb)
-
-    elif data == "report_problem":
-        kb = InlineKeyboardMarkup([[InlineKeyboardButton("Continue", callback_data="report_continue"), InlineKeyboardButton("Back", callback_data="dashboard")]])
-        try: await query.message.delete()
-        except: pass
-        await context.bot.send_message(chat_id=chat_id, text="⚠️ Notice: You can send 1 report per week. Please continue carefully.", reply_markup=kb)
-
-    elif data == "report_continue":
-        last_rep = user_records.get(user.id, {}).get("last_report", 0.0)
-        if time.time() - last_rep < 604800:
+    try:
+        # -- ADMIN /GO MENU --
+        if data == "adm_menu_announcement":
+            admin_sessions[ADMIN_ID] = {"step": "WAITING_ANNOUNCEMENT"}
+            await edit_message_or_caption(query, "Write Announcement Message (You can attach image or video):")
+        elif data == "adm_menu_endsale":
+            admin_sessions[ADMIN_ID] = {"step": "WAITING_SALE_DATE", "data": {}}
+            await edit_message_or_caption(query, "Send date and time format: dd/mm/yy 1-12Am/Pm:")
+        elif data == "adm_menu_msg_user":
+            admin_sessions[ADMIN_ID] = {"step": "WAITING_MSG_USER_ID"}
+            await edit_message_or_caption(query, "Send User ID to message:")
+        elif data == "adm_menu_spoffer":
+            admin_sessions[ADMIN_ID] = {"step": "WAITING_SPO_LINK", "data": {}}
+            await edit_message_or_caption(query, "Send Flipkart Link:")
+        elif data == "adm_menu_end":
+            kb = [[InlineKeyboardButton("User", callback_data="adm_menu_end_user"), InlineKeyboardButton("All", callback_data="adm_menu_end_all")]]
+            await edit_message_or_caption(query, "Block a specific User or All?", reply_markup=InlineKeyboardMarkup(kb))
+        elif data == "adm_menu_end_user":
+            admin_sessions[ADMIN_ID] = {"step": "WAITING_BLOCK_USER_ID"}
+            await edit_message_or_caption(query, "Send User ID to block:")
+        elif data == "adm_menu_end_all":
+            kb = [[InlineKeyboardButton("Confirm Block All", callback_data="adm_menu_end_all_confirm")]]
+            await edit_message_or_caption(query, "Are you sure?", reply_markup=InlineKeyboardMarkup(kb))
+        elif data == "adm_menu_end_all_confirm":
+            for u_id, rec in list(user_records.items()):
+                if u_id != ADMIN_ID:
+                    await sync_user_to_channel(context, u_id, "Blocked", rec.get("trial", 0), rec.get("last_report", 0.0), rec.get("refer_code", "None"), rec.get("refer_from", "None"), rec.get("reward_given", "False"))
+                    await asyncio.sleep(0.05)
+            await edit_message_or_caption(query, "✅ All users blocked.")
+        elif data == "adm_menu_close":
             try: await query.message.delete()
             except: pass
-            kb = InlineKeyboardMarkup([[InlineKeyboardButton("Back", callback_data="dashboard")]])
-            await context.bot.send_message(chat_id=chat_id, text="❌ You have already submitted a report this week. Try again later.", reply_markup=kb)
-            return
+
+        # -- ADMIN ACCEPT WORKFLOW --
+        elif data.startswith("adm_accept_"):
+            target_id = int(data.split("adm_accept_")[1])
+            admin_sessions[ADMIN_ID] = {"target_user_id": target_id, "step": "WAITING_ALL_DETAILS", "data": {}}
+            prompt = (f"✅ <b>Accepted User <code>{target_id}</code></b>\n\n"
+                      "<b>Send details in exactly 3 lines:</b>\n"
+                      "Line 1: Discount (e.g. 50% or ₹15,000)\n"
+                      "Line 2: Final Price (e.g. 45000)\n"
+                      "Line 3: HyperLink (Long affiliate link to shorten)")
+            await edit_message_or_caption(query, prompt, parse_mode="HTML")
+
+        # -- ADMIN REJECT MENU --
+        elif data.startswith("adm_reject_menu_"):
+            target_id = int(data.split("adm_reject_menu_")[1])
+            kb = [
+                [InlineKeyboardButton("🔴 Out of Stock", callback_data=f"adm_rej_stock_{target_id}")],
+                [InlineKeyboardButton("🟡 Discount Not Available (Refund)", callback_data=f"adm_rej_nodisc_{target_id}")],
+                [InlineKeyboardButton("⚪ Invalid Link", callback_data=f"adm_rej_invalid_{target_id}")],
+                [InlineKeyboardButton("🔙 Cancel", callback_data=f"adm_rej_cancel_{target_id}")]
+            ]
+            await edit_message_or_caption(query, f"Select Rejection Reason for User <code>{target_id}</code>:", reply_markup=InlineKeyboardMarkup(kb), parse_mode="HTML")
+
+        elif data.startswith("adm_rej_cancel_"):
+            target_id = int(data.split("adm_rej_cancel_")[1])
+            kb = InlineKeyboardMarkup([[InlineKeyboardButton("Accept", callback_data=f"adm_accept_{target_id}"), InlineKeyboardButton("Reject", callback_data=f"adm_reject_menu_{target_id}")]])
+            req_data = context.bot_data.get("pending_requests", {}).get(target_id, {})
+            full_name = req_data.get("full_name", f"User {target_id}")
+            p_name = req_data.get("product_name", "Flipkart Product")
+            p_price = req_data.get("product_price", 0)
+            p_link = req_data.get("product_link", "https://flipkart.com")
+            mob = req_data.get("mobile_num", "")
             
-        context.user_data["state"] = "WAITING_VOICE_REPORT"
-        kb = InlineKeyboardMarkup([[InlineKeyboardButton("Back", callback_data="dashboard")]])
-        try: await query.message.delete()
-        except: pass
-        await context.bot.send_message(chat_id=chat_id, text="Send a 30-Second Voice Note explaining your issue:", reply_markup=kb)
+            price_display = format_inr(p_price) if p_price > 0 else "N/A"
+            admin_message = (
+                f"1. <b><code>{target_id}</code></b>\n"
+                f"2. {full_name}\n"
+                f"3. <b>Product:</b> {p_name}\n"
+                f"4. <b>Original Price:</b> {price_display}\n"
+                f"5. <b>Link:</b> {p_link}\n"
+                f"6. <b>Mobile:</b> {mob}"
+            )
+            await edit_message_or_caption(query, admin_message, reply_markup=kb, parse_mode="HTML")
 
-    elif data == "purchase_menu":
-        try: await query.message.delete()
-        except: pass
-        buttons = [
-            [InlineKeyboardButton("1 Discount (500 ⭐️)", callback_data="buy_pack_1")],
-            [InlineKeyboardButton("2 Discounts (999 ⭐️)", callback_data="buy_pack_2")],
-            [InlineKeyboardButton("4 Discounts (1400 ⭐️)", callback_data="buy_pack_4")],
-            [InlineKeyboardButton("8 Discounts (3000 ⭐️)", callback_data="buy_pack_8")],
-            [InlineKeyboardButton("Enter Referral Code", callback_data="enter_referral")],
-            [InlineKeyboardButton("Back", callback_data="dashboard")]
-        ]
-        text = ("🛒 <b>Discount Store</b>\n\n"
-                "Purchase Discounts using Telegram Stars!\n\n"
-                "💡 <b>Referral Program:</b>\n"
-                "Buy the 8 Discounts pack to unlock your own Referral Code! When your friends use it, they get 1 free Discount, and when they buy a pack, you get 1 free Discount as a gift!")
-        await context.bot.send_message(chat_id=chat_id, text=text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(buttons))
+        elif data.startswith("adm_rej_stock_"):
+            target_id = int(data.split("adm_rej_stock_")[1])
+            await context.bot.send_message(chat_id=target_id, text="Your provided Product is out of stock and you waste your 1 discount point")
+            await edit_message_or_caption(query, f"❌ Rejected User <code>{target_id}</code>\n<b>Reason:</b> Out of Stock (No Refund)", parse_mode="HTML")
 
-    elif data == "enter_referral":
-        context.user_data["state"] = "WAITING_REFERRAL_CODE"
-        try: await query.message.delete()
-        except: pass
-        kb = InlineKeyboardMarkup([[InlineKeyboardButton("Cancel", callback_data="purchase_menu")]])
-        await context.bot.send_message(chat_id=chat_id, text="Please send the Referral Code you received:", reply_markup=kb)
+        elif data.startswith("adm_rej_nodisc_"):
+            target_id = int(data.split("adm_rej_nodisc_")[1])
+            req_data = context.bot_data.get("pending_requests", {}).get(target_id, {})
+            p_name = req_data.get("product_name", "Flipkart Product")
+            p_link = req_data.get("product_link", "https://flipkart.com")
+            
+            # Refund 1 point back seamlessly
+            rec = user_records.get(target_id, {})
+            refunded_trials = rec.get("trial", 0) + 1
+            await sync_user_to_channel(context, target_id, rec.get("status", "Active"), refunded_trials, rec.get("last_report", 0.0), rec.get("refer_code", "None"), rec.get("refer_from", "None"), rec.get("reward_given", "False"))
 
-    elif data.startswith("buy_pack_"):
-        try: await query.message.delete()
-        except: pass
-        title, description, payload, price_amount = "", "", "", 0
-        if data == "buy_pack_1":
-            title, description, payload, price_amount = "1 Discount", "Get 1 Free Discount", "buy_pack_1", 500
-        elif data == "buy_pack_2":
-            title, description, payload, price_amount = "2 Discounts", "Get 2 Free Discounts", "buy_pack_2", 999
-        elif data == "buy_pack_4":
-            title, description, payload, price_amount = "4 Discounts", "Get 4 Free Discounts", "buy_pack_4", 1400
-        elif data == "buy_pack_8":
-            title, description, payload, price_amount = "8 Discounts", "Get 8 Free Discounts + Unlocks Referral Code", "buy_pack_8", 3000
-        prices = [LabeledPrice(title, price_amount)]
+            user_msg = f'Discount Not avalable on <a href="{p_link}">{p_name}</a> We gave you Your 1 discount point back'
+            await context.bot.send_message(chat_id=target_id, text=user_msg, parse_mode="HTML", disable_web_page_preview=True)
+            await edit_message_or_caption(query, f"❌ Rejected User <code>{target_id}</code>\n<b>Reason:</b> Discount Not Available\n✅ <b>1 Discount Point Refunded to User</b>", parse_mode="HTML")
+
+        elif data.startswith("adm_rej_invalid_"):
+            target_id = int(data.split("adm_rej_invalid_")[1])
+            await context.bot.send_message(chat_id=target_id, text="Your provided link is Changed by other server")
+            await edit_message_or_caption(query, f"❌ Rejected User <code>{target_id}</code>\n<b>Reason:</b> Invalid / Changed Link", parse_mode="HTML")
+
+        # -- ADMIN VERIFICATION BEFORE SENDING --
+        elif data == "verify_no":
+            if ADMIN_ID in admin_sessions:
+                admin_sessions[ADMIN_ID]["step"] = "WAITING_ALL_DETAILS"
+                await edit_message_or_caption(query, "Let's rewrite.\nSend details in exactly 3 lines:\nLine 1: Discount\nLine 2: Final Price\nLine 3: HyperLink")
         
-        kb = InlineKeyboardMarkup([
-            [InlineKeyboardButton(f"Pay {price_amount} ⭐️", pay=True)],
-            [InlineKeyboardButton("Cancel / Back", callback_data="purchase_menu")]
-        ])
-        await context.bot.send_invoice(chat_id=chat_id, title=title, description=description, payload=payload, provider_token="", currency="XTR", prices=prices, reply_markup=kb)
+        elif data == "verify_yes":
+            if ADMIN_ID not in admin_sessions: return
+            session = admin_sessions[ADMIN_ID]
+            target_id = session.get("target_user_id")
+            data_dict = session.get("data", {})
+            
+            await edit_message_or_caption(query, "⏳ <b>Creating custom Rebrandly Short Link... Please wait.</b>", parse_mode="HTML")
 
-    elif data == "direct_start":
-        context.bot_data.setdefault("user_flow_states", {})[user.id] = "NONE"
-        context.user_data["state"] = "WAITING_FLIPKART_LINK"
-        kb = InlineKeyboardMarkup([[InlineKeyboardButton("Back", callback_data="dashboard")]])
-        text = "Send Your Product Link. The Product must be Electronic, and the price (without discount) must be at least ₹50,000."
-        try: await query.message.delete()
-        except: pass
-        await send_dynamic_media(context, chat_id, "ProductLink", text, kb)
+            req_data = context.bot_data.get("pending_requests", {}).get(target_id, {})
+            user_orig_link = req_data.get("product_link", "https://flipkart.com")
+            user_mobile = req_data.get("mobile_num", "0000000000")
+            prod_name = req_data.get("product_name", "Flipkart Product")
+            prod_img_bytes = req_data.get("product_image_bytes")
 
-    elif data == "edit_details":
-        context.user_data["state"] = "WAITING_FLIPKART_LINK"
-        try: await query.message.delete()
-        except: pass
-        await context.bot.send_message(chat_id=chat_id, text="Send Your Product Link again:")
+            original_hyperlink = data_dict["hyper_link"]
+            success, short_or_err = await asyncio.to_thread(create_rebrandly_short_link, original_hyperlink, user_mobile)
+            
+            if not success:
+                await edit_message_or_caption(
+                    query,
+                    f"❌ <b>Rebrandly Short Link Generation Failed!</b>\n\n"
+                    f"<b>Reason:</b> {short_or_err}\n\n"
+                    f"⚠️ <i>User was NOT notified because the short link could not be created. Please verify your Rebrand_Api key and try again.</i>",
+                    parse_mode="HTML"
+                )
+                return
 
-    elif data == "continue_submit":
-        rec = user_records.get(user.id, {})
-        trials_left = rec.get("trial", 0)
-        new_trial_count = max(0, trials_left - 1)
-        await sync_user_to_channel(context, user.id, rec.get("status", "Active"), new_trial_count, rec.get("last_report", 0.0), rec.get("refer_code", "None"), rec.get("refer_from", "None"), rec.get("reward_given", "False"))
-
-        try: await query.message.delete()
-        except: pass
-        await context.bot.send_message(chat_id=chat_id, text="Turn on bot notification. We will send you the best discount within a few minutes.\nThank you for using Rebrand.")
-
-        full_name = f"{user.first_name} {user.last_name or ''}".strip()
-        p_name = context.user_data.get('product_name', 'Flipkart Product')
-        p_link = context.user_data.get('product_link', 'https://flipkart.com')
-        mob = context.user_data.get('mobile_num', '')
-        img_bytes = context.user_data.get('product_image_bytes')
-
-        # Store in robust memory so Admin has access even if user navigates
-        context.bot_data.setdefault("pending_requests", {})[user.id] = {
-            "full_name": full_name,
-            "product_name": p_name,
-            "product_link": p_link,
-            "mobile_num": mob,
-            "product_image_bytes": img_bytes
-        }
-
-        admin_message = (
-            f"1. <b><code>{user.id}</code></b>\n"
-            f"2. {full_name}\n"
-            f"3. <b>Product:</b> {p_name}\n"
-            f"4. <b>Link:</b> {p_link}\n"
-            f"5. <b>Mobile:</b> {mob}"
-        )
-        keyboard = InlineKeyboardMarkup([
-            [InlineKeyboardButton("Accept", callback_data=f"adm_accept_{user.id}"),
-             InlineKeyboardButton("Reject", callback_data=f"adm_reject_menu_{user.id}")]
-        ])
-        
-        if img_bytes:
+            final_price_fmt = format_inr(data_dict["final_price"])
+            
+            context.bot_data.setdefault("ready_links", {})[target_id] = {
+                "hyper_link": short_or_err,
+                "discount": data_dict["discount"],
+                "product_name": prod_name,
+                "product_image_bytes": prod_img_bytes,
+                "final_price": final_price_fmt,
+                "orig_link": user_orig_link
+            }
+            context.bot_data.setdefault("user_flow_states", {})[target_id] = "READY"
+            
+            kb = InlineKeyboardMarkup([
+                [InlineKeyboardButton("Continue", callback_data="user_continue_ready"), InlineKeyboardButton("Tutorial", callback_data="tutorial_ready_chk")]
+            ])
+            msg_text = "🎉 <b>Congratulations!</b>\nYour link is qualified for a discount."
+            
             try:
-                await context.bot.send_photo(chat_id=ADMIN_ID, photo=io.BytesIO(img_bytes), caption=admin_message, parse_mode="HTML", reply_markup=keyboard)
-            except Exception:
+                await send_dynamic_media(context, target_id, "Ready", msg_text, kb)
+                await edit_message_or_caption(
+                    query,
+                    f"✅ <b>Setup Completed!</b>\n\n"
+                    f"🔗 <b>Short Link:</b> <code>{short_or_err}</code>\n"
+                    f"📦 <b>Product:</b> {prod_name}\n\n"
+                    f"Message successfully sent to User <code>{target_id}</code>.",
+                    parse_mode="HTML"
+                )
+            except Exception as e:
+                await edit_message_or_caption(query, f"✅ Setup Completed in memory, but ❌ Failed to notify User <code>{target_id}</code>. Error: {e}", parse_mode="HTML")
+                
+            del admin_sessions[ADMIN_ID]
+
+        # -- USER /START MENUS --
+        elif data == "lets_start":
+            text = "Hi I am Rebrand bot and I have a Tutorial Video. Which language do you want for that video?"
+            kb = InlineKeyboardMarkup([[InlineKeyboardButton("Hindi", callback_data="lang_hi"), InlineKeyboardButton("English", callback_data="lang_en")]])
+            try: await query.message.delete()
+            except: pass
+            await context.bot.send_message(chat_id=chat_id, text=text, reply_markup=kb)
+
+        elif data in ["lang_hi", "lang_en"]:
+            context.user_data['lang'] = data
+            tag = "HindiTutorial" if data == "lang_hi" else "EnglishTutorial"
+            kb = InlineKeyboardMarkup([[InlineKeyboardButton("Lets Get Discount", callback_data="dashboard")]])
+            try: await query.message.delete()
+            except: pass
+            caption = "⚠️ <b>Bina Video Dekhe Continue na kare</b>\n\nHere is the tutorial:"
+            await send_dynamic_media(context, chat_id, tag, caption=caption, reply_markup=kb)
+
+        elif data == "dashboard":
+            trials_left = user_records.get(user.id, {}).get("trial", 0)
+            buttons = [
+                [InlineKeyboardButton("Report a Problem", callback_data="report_problem"), InlineKeyboardButton("Terms", callback_data="terms")],
+                [InlineKeyboardButton("About us", callback_data="about_us"), InlineKeyboardButton("Shop", callback_data="purchase_menu")]
+            ]
+            
+            if trials_left > 0:
+                buttons.append([InlineKeyboardButton(f"🚀 Start x{trials_left}", callback_data="direct_start")])
+            else:
+                buttons.append([InlineKeyboardButton(f"🚀 Start x0", callback_data="no_trial_start")])
+
+            try: await query.message.delete()
+            except: pass
+            await context.bot.send_message(chat_id=chat_id, text="Welcome to Rebrand Dashboard!", reply_markup=InlineKeyboardMarkup(buttons))
+
+        elif data == "no_trial_start":
+            kb = InlineKeyboardMarkup([
+                [InlineKeyboardButton("Enter Referral Code", callback_data="enter_referral")],
+                [InlineKeyboardButton("Shop", callback_data="purchase_menu")],
+                [InlineKeyboardButton("Back", callback_data="dashboard")]
+            ])
+            try: await query.message.delete()
+            except: pass
+            await context.bot.send_message(chat_id=chat_id, text="Enter Referral Code Here or Purchase Discounts", reply_markup=kb)
+
+        elif data == "about_us":
+            lang = context.user_data.get('lang', 'lang_en')
+            if lang == "lang_hi":
+                text = (
+                    "Rebrand Kaise Kaam Karta Hai:\n"
+                    "Jab Flipkart bade sales event host karta hai, tab high traffic ki wajah se server timeout aur session drop ho jate hain. Jisse valid price drops aur tokens fail ho jate hain.\n\n"
+                    "Rebrand in unhandled session tokens ke liye ek fallback repository hai:\n"
+                    "• Real-Time Capture: Humara system sale ke dauran expire hue tokens ko log karta hai.\n"
+                    "• Sale khatam hone ke baad bhi aap in verified tokens se heavy discount pa sakte hain.\n"
+                    "• Supported Sales: Big Billion Days, GOAT Sale, Big Diwali Sale, Flipkart Black Friday Sale."
+                )
+            else:
+                text = (
+                    "How Rebrand Works:\n"
+                    "When major e-commerce platforms like Flipkart host flagship sales events, high traffic volumes frequently lead to server timeouts and session drops. Consequently, thousands of valid price drops, flash discounts, and promotional tokens are abandoned or fail at checkout.\n\n"
+                    "Rebrand serves as a dedicated fallback repository for these unhandled session tokens:\n"
+                    "• Real-Time Token Capture: Our system logs expired or dropped discount session tokens generated during high-load sale events.\n"
+                    "• Automated Liquidation: We aggregate and validate these tokens so members can access heavy discounts even after flash sales end.\n"
+                    "• Multi-Sale Integration: Fully synced across major shopping festivals:\n"
+                    "Big Billion Days, GOAT Sale, Big Diwali Sale, Flipkart Black Friday Sale."
+                )
+            kb = InlineKeyboardMarkup([[InlineKeyboardButton("Back", callback_data="dashboard")]])
+            try: await query.message.delete()
+            except: pass
+            await send_dynamic_media(context, chat_id, "Logo", text, kb)
+
+        elif data == "terms":
+            lang = context.user_data.get('lang', 'lang_en')
+            if lang == "lang_hi":
+                text = (
+                    "Terms - Upyogkarta ki Zimmedari aur Refund Policy\n\n"
+                    "Users ko apna sahi aur active Flipkart registered mobile number dena anivarya hai. Rebrand is number aur link ka istemal karke ek secure token banata hai jo automatically discount apply karke checkout page kholta hai.\n\n"
+                    "Kripya dhyan dein ki order seedha aapke diye gaye number se linked account pe place hoga. Galat ya unauthorized number dene ki stithi mein kisi bhi nuksan ke liye Rebrand zimmedar nahi hoga aur koi refund/cancellation nahi hoga.\n\n"
+                    "Lekin, agar valid mobile number hone ke bawajood payment fail hoti hai, toh Rebrand pure transaction amount ki refund ki guarantee deta hai."
+                )
+            else:
+                text = (
+                    "Terms - User Responsibility, Automation, and Refund Policy\n\n"
+                    "Users must provide the correct and active mobile number linked to their Flipkart account. The Rebrand bot utilizes this mobile number and the provided product link to generate a secure session token specifically for the checkout process, directly opening a checkout page with the discount automatically applied.\n\n"
+                    "Please be advised that the transaction will be processed and the order will be placed directly on the Flipkart account associated with the mobile number you provide. Rebrand is not responsible, and no refunds or cancellations will be issued, for any financial losses or incorrect orders resulting from the submission of an inaccurate, incorrect, or unauthorized mobile number by the user.\n\n"
+                    "However, if a payment fails despite the user providing a valid and correct mobile number, Rebrand guarantees a full refund for the transaction amount."
+                )
+            kb = InlineKeyboardMarkup([[InlineKeyboardButton("Back", callback_data="dashboard")]])
+            try: await query.message.delete()
+            except: pass
+            await context.bot.send_message(chat_id=chat_id, text=text, reply_markup=kb)
+
+        elif data == "report_problem":
+            kb = InlineKeyboardMarkup([[InlineKeyboardButton("Continue", callback_data="report_continue"), InlineKeyboardButton("Back", callback_data="dashboard")]])
+            try: await query.message.delete()
+            except: pass
+            await context.bot.send_message(chat_id=chat_id, text="⚠️ Notice: You can send 1 report per week. Please continue carefully.", reply_markup=kb)
+
+        elif data == "report_continue":
+            last_rep = user_records.get(user.id, {}).get("last_report", 0.0)
+            if time.time() - last_rep < 604800:
+                try: await query.message.delete()
+                except: pass
+                kb = InlineKeyboardMarkup([[InlineKeyboardButton("Back", callback_data="dashboard")]])
+                await context.bot.send_message(chat_id=chat_id, text="❌ You have already submitted a report this week. Try again later.", reply_markup=kb)
+                return
+                
+            context.user_data["state"] = "WAITING_VOICE_REPORT"
+            kb = InlineKeyboardMarkup([[InlineKeyboardButton("Back", callback_data="dashboard")]])
+            try: await query.message.delete()
+            except: pass
+            await context.bot.send_message(chat_id=chat_id, text="Send a 30-Second Voice Note explaining your issue:", reply_markup=kb)
+
+        elif data == "purchase_menu":
+            try: await query.message.delete()
+            except: pass
+            buttons = [
+                [InlineKeyboardButton("1 Discount (500 ⭐️)", callback_data="buy_pack_1")],
+                [InlineKeyboardButton("2 Discounts (999 ⭐️)", callback_data="buy_pack_2")],
+                [InlineKeyboardButton("4 Discounts (1400 ⭐️)", callback_data="buy_pack_4")],
+                [InlineKeyboardButton("8 Discounts (3000 ⭐️)", callback_data="buy_pack_8")],
+                [InlineKeyboardButton("Enter Referral Code", callback_data="enter_referral")],
+                [InlineKeyboardButton("Back", callback_data="dashboard")]
+            ]
+            text = ("🛒 <b>Discount Store</b>\n\n"
+                    "Purchase Discounts using Telegram Stars!\n\n"
+                    "💡 <b>Referral Program:</b>\n"
+                    "Buy the 8 Discounts pack to unlock your own Referral Code! When your friends use it, they get 1 free Discount, and when they buy a pack, you get 1 free Discount as a gift!")
+            await context.bot.send_message(chat_id=chat_id, text=text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(buttons))
+
+        elif data == "enter_referral":
+            context.user_data["state"] = "WAITING_REFERRAL_CODE"
+            try: await query.message.delete()
+            except: pass
+            kb = InlineKeyboardMarkup([[InlineKeyboardButton("Cancel", callback_data="purchase_menu")]])
+            await context.bot.send_message(chat_id=chat_id, text="Please send the Referral Code you received:", reply_markup=kb)
+
+        # --- ADMIN DIRECT BYPASS & STAR PAYMENTS ---
+        elif data.startswith("buy_pack_"):
+            try: await query.message.delete()
+            except: pass
+
+            # Admin Free Bypass Logic
+            if user.id == ADMIN_ID:
+                added = 1 if data == "buy_pack_1" else 2 if data == "buy_pack_2" else 4 if data == "buy_pack_4" else 8
+                current_rec = user_records.get(ADMIN_ID, {})
+                new_trials = current_rec.get("trial", 0) + added
+                await sync_user_to_channel(context, ADMIN_ID, "Active", new_trials, current_rec.get("last_report", 0.0), current_rec.get("refer_code", "None"), current_rec.get("refer_from", "None"), "False")
+                
+                kb = InlineKeyboardMarkup([[InlineKeyboardButton("Back to Dashboard", callback_data="dashboard")]])
+                await context.bot.send_message(
+                    chat_id=chat_id,
+                    text=f"👑 <b>Admin Direct Bypass Activated!</b>\n\nAdded <b>+{added} Discounts</b> directly to your account for free.\nTotal Balance: <b>{new_trials}</b> Discounts.",
+                    parse_mode="HTML",
+                    reply_markup=kb
+                )
+                return
+
+            # Normal User Stars Invoice Logic
+            title, description, payload, price_amount = "", "", "", 0
+            if data == "buy_pack_1":
+                title, description, payload, price_amount = "1 Discount", "Get 1 Free Discount", "buy_pack_1", 500
+            elif data == "buy_pack_2":
+                title, description, payload, price_amount = "2 Discounts", "Get 2 Free Discounts", "buy_pack_2", 999
+            elif data == "buy_pack_4":
+                title, description, payload, price_amount = "4 Discounts", "Get 4 Free Discounts", "buy_pack_4", 1400
+            elif data == "buy_pack_8":
+                title, description, payload, price_amount = "8 Discounts", "Get 8 Free Discounts + Unlocks Referral Code", "buy_pack_8", 3000
+            prices = [LabeledPrice(title, price_amount)]
+            
+            kb = InlineKeyboardMarkup([
+                [InlineKeyboardButton(f"Pay {price_amount} ⭐️", pay=True)],
+                [InlineKeyboardButton("Cancel / Back", callback_data="purchase_menu")]
+            ])
+            await context.bot.send_invoice(chat_id=chat_id, title=title, description=description, payload=payload, provider_token="", currency="XTR", prices=prices, reply_markup=kb)
+
+        elif data == "direct_start":
+            context.bot_data.setdefault("user_flow_states", {})[user.id] = "NONE"
+            context.user_data["state"] = "WAITING_FLIPKART_LINK"
+            kb = InlineKeyboardMarkup([[InlineKeyboardButton("Back", callback_data="dashboard")]])
+            text = "Send Your Product Link. The Product must be Electronic, and the price (without discount) must be at least ₹50,000."
+            try: await query.message.delete()
+            except: pass
+            await send_dynamic_media(context, chat_id, "ProductLink", text, kb)
+
+        elif data == "edit_details":
+            context.user_data["state"] = "WAITING_FLIPKART_LINK"
+            try: await query.message.delete()
+            except: pass
+            await context.bot.send_message(chat_id=chat_id, text="Send Your Product Link again:")
+
+        elif data == "continue_submit":
+            rec = user_records.get(user.id, {})
+            trials_left = rec.get("trial", 0)
+            new_trial_count = max(0, trials_left - 1)
+            await sync_user_to_channel(context, user.id, rec.get("status", "Active"), new_trial_count, rec.get("last_report", 0.0), rec.get("refer_code", "None"), rec.get("refer_from", "None"), rec.get("reward_given", "False"))
+
+            try: await query.message.delete()
+            except: pass
+            await context.bot.send_message(chat_id=chat_id, text="Turn on bot notification. We will send you the best discount within a few minutes.\nThank you for using Rebrand.")
+
+            full_name = f"{user.first_name} {user.last_name or ''}".strip()
+            p_name = context.user_data.get('product_name', 'Flipkart Product')
+            p_price = context.user_data.get('product_price', 0)
+            p_link = context.user_data.get('product_link', 'https://flipkart.com')
+            mob = context.user_data.get('mobile_num', '')
+            img_bytes = context.user_data.get('product_image_bytes')
+
+            context.bot_data.setdefault("pending_requests", {})[user.id] = {
+                "full_name": full_name,
+                "product_name": p_name,
+                "product_price": p_price,
+                "product_link": p_link,
+                "mobile_num": mob,
+                "product_image_bytes": img_bytes
+            }
+
+            price_display = format_inr(p_price) if p_price > 0 else "N/A"
+            admin_message = (
+                f"1. <b><code>{user.id}</code></b>\n"
+                f"2. {full_name}\n"
+                f"3. <b>Product:</b> {p_name}\n"
+                f"4. <b>Original Price:</b> {price_display}\n"
+                f"5. <b>Link:</b> {p_link}\n"
+                f"6. <b>Mobile:</b> {mob}"
+            )
+            keyboard = InlineKeyboardMarkup([
+                [InlineKeyboardButton("Accept", callback_data=f"adm_accept_{user.id}"),
+                 InlineKeyboardButton("Reject", callback_data=f"adm_reject_menu_{user.id}")]
+            ])
+            
+            if img_bytes:
+                try:
+                    await context.bot.send_photo(chat_id=ADMIN_ID, photo=io.BytesIO(img_bytes), caption=admin_message, parse_mode="HTML", reply_markup=keyboard)
+                except Exception:
+                    await context.bot.send_message(chat_id=ADMIN_ID, text=admin_message, parse_mode="HTML", reply_markup=keyboard)
+            else:
                 await context.bot.send_message(chat_id=ADMIN_ID, text=admin_message, parse_mode="HTML", reply_markup=keyboard)
-        else:
+
+        # -- SPECIAL OFFER BUTTON --
+        elif data == "sp_offer_grab":
+            try: await query.message.delete()
+            except: pass
+            await context.bot.send_message(chat_id=chat_id, text="Turn on bot notification. We will send you the Discount Redirect.\nThank you for using Rebrand.")
+            full_name = f"{user.first_name} {user.last_name or ''}".strip()
+            admin_message = f"🎁 <b>[Special Offer]</b>\n1. <b><code>{user.id}</code></b>\n2. {full_name}"
+            keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("Accept", callback_data=f"adm_accept_{user.id}"), InlineKeyboardButton("Reject", callback_data=f"adm_reject_menu_{user.id}")]])
             await context.bot.send_message(chat_id=ADMIN_ID, text=admin_message, parse_mode="HTML", reply_markup=keyboard)
 
-    # -- SPECIAL OFFER BUTTON --
-    elif data == "sp_offer_grab":
-        try: await query.message.delete()
-        except: pass
-        await context.bot.send_message(chat_id=chat_id, text="Turn on bot notification. We will send you the Discount Redirect.\nThank you for using Rebrand.")
-        full_name = f"{user.first_name} {user.last_name or ''}".strip()
-        admin_message = f"🎁 <b>[Special Offer]</b>\n1. <b><code>{user.id}</code></b>\n2. {full_name}"
-        keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("Accept", callback_data=f"adm_accept_{user.id}"), InlineKeyboardButton("Reject", callback_data=f"adm_reject_menu_{user.id}")]])
-        await context.bot.send_message(chat_id=ADMIN_ID, text=admin_message, parse_mode="HTML", reply_markup=keyboard)
-
-    # -- POST-APPROVAL WORKFLOW FOR USER --
-    elif data == "resend_qualified_msg":
-        try: await query.message.delete()
-        except: pass
-        kb = InlineKeyboardMarkup([
-            [InlineKeyboardButton("Continue", callback_data="user_continue_ready"), InlineKeyboardButton("Tutorial", callback_data="tutorial_ready_chk")]
-        ])
-        msg_text = "🎉 <b>Congratulations!</b>\nYour link is qualified for a discount."
-        await send_dynamic_media(context, chat_id, "Ready", msg_text, kb)
-        
-    elif data == "tutorial_ready_chk":
-        lang = context.user_data.get('lang', 'lang_en')
-        tag = "HindiTutorial" if lang == "lang_hi" else "EnglishTutorial"
-        kb = InlineKeyboardMarkup([[InlineKeyboardButton("Back", callback_data="resend_qualified_msg")]])
-        try: await query.message.delete()
-        except: pass
-        caption = "⚠️ <b>Bina Video Dekhe Continue na kare</b>\n\nHere is the tutorial:"
-        await send_dynamic_media(context, chat_id, tag, caption=caption, reply_markup=kb)
-
-    elif data == "user_continue_ready":
-        try: await query.message.delete()
-        except: pass
-        
-        d_data = context.bot_data.get("ready_links", {}).get(user.id, {})
-        if not d_data:
-            await context.bot.send_message(chat_id=chat_id, text="❌ Data fetch error. Please contact support.")
-            return
-
-        orig_link = d_data.get('orig_link', 'https://flipkart.com')
-        if not orig_link.startswith(('http://', 'https://')):
-            orig_link = 'https://' + orig_link
+        # -- POST-APPROVAL WORKFLOW FOR USER --
+        elif data == "resend_qualified_msg":
+            try: await query.message.delete()
+            except: pass
+            kb = InlineKeyboardMarkup([
+                [InlineKeyboardButton("Continue", callback_data="user_continue_ready"), InlineKeyboardButton("Tutorial", callback_data="tutorial_ready_chk")]
+            ])
+            msg_text = "🎉 <b>Congratulations!</b>\nYour link is qualified for a discount."
+            await send_dynamic_media(context, chat_id, "Ready", msg_text, kb)
             
-        product_html = f"<a href='{orig_link}'>{d_data.get('product_name')}</a>"
+        elif data == "tutorial_ready_chk":
+            lang = context.user_data.get('lang', 'lang_en')
+            tag = "HindiTutorial" if lang == "lang_hi" else "EnglishTutorial"
+            kb = InlineKeyboardMarkup([[InlineKeyboardButton("Back", callback_data="resend_qualified_msg")]])
+            try: await query.message.delete()
+            except: pass
+            caption = "⚠️ <b>Bina Video Dekhe Continue na kare</b>\n\nHere is the tutorial:"
+            await send_dynamic_media(context, chat_id, tag, caption=caption, reply_markup=kb)
 
-        text = (f"🎉 You got <b>{d_data.get('discount')}</b> on <b>{product_html}</b>.\n"
-                f"You can purchase this product for <b>{d_data.get('final_price')}</b>.\n\n"
-                f"⚠️ <b>This link is valid for 10 Minutes only.</b>")
-        
-        url = d_data.get('hyper_link', 'https://flipkart.com')
-        if not url.startswith(('http://', 'https://')):
-            url = 'https://' + url
+        elif data == "user_continue_ready":
+            try: await query.message.delete()
+            except: pass
             
-        kb = InlineKeyboardMarkup([[InlineKeyboardButton("🔴 Buy Now 🔴", url=url)]])
-        
-        image_bytes = d_data.get('product_image_bytes')
-        if image_bytes:
-            try:
-                await context.bot.send_photo(chat_id=chat_id, photo=io.BytesIO(image_bytes), caption=text, parse_mode="HTML", reply_markup=kb)
-            except Exception:
+            d_data = context.bot_data.get("ready_links", {}).get(user.id, {})
+            if not d_data:
+                await context.bot.send_message(chat_id=chat_id, text="❌ Data fetch error. Please contact support.")
+                return
+
+            orig_link = d_data.get('orig_link', 'https://flipkart.com')
+            if not orig_link.startswith(('http://', 'https://')):
+                orig_link = 'https://' + orig_link
+                
+            product_html = f"<a href='{orig_link}'>{d_data.get('product_name')}</a>"
+
+            text = (f"🎉 You got <b>{d_data.get('discount')}</b> on <b>{product_html}</b>.\n"
+                    f"You can purchase this product for <b>{d_data.get('final_price')}</b>.\n\n"
+                    f"⚠️ <b>This link is valid for 10 Minutes only.</b>")
+            
+            url = d_data.get('hyper_link', 'https://flipkart.com')
+            if not url.startswith(('http://', 'https://')):
+                url = 'https://' + url
+                
+            kb = InlineKeyboardMarkup([[InlineKeyboardButton("🔴 Buy Now 🔴", url=url)]])
+            
+            image_bytes = d_data.get('product_image_bytes')
+            if image_bytes:
+                try:
+                    await context.bot.send_photo(chat_id=chat_id, photo=io.BytesIO(image_bytes), caption=text, parse_mode="HTML", reply_markup=kb)
+                except Exception as e:
+                    print(f"Error sending photo to user: {e}")
+                    await context.bot.send_message(chat_id=chat_id, text=text, parse_mode="HTML", reply_markup=kb, disable_web_page_preview=True)
+            else:
                 await context.bot.send_message(chat_id=chat_id, text=text, parse_mode="HTML", reply_markup=kb, disable_web_page_preview=True)
-        else:
-            await context.bot.send_message(chat_id=chat_id, text=text, parse_mode="HTML", reply_markup=kb, disable_web_page_preview=True)
-        
-        if user.id in context.bot_data.get("user_flow_states", {}):
-            context.bot_data["user_flow_states"][user.id] = "DONE"
+            
+            if user.id in context.bot_data.get("user_flow_states", {}):
+                context.bot_data["user_flow_states"][user.id] = "DONE"
+
+    finally:
+        # Release Debounce Lock after 1 second
+        await asyncio.sleep(1.0)
+        click_locks.discard(lock_key)
 
 
 # ---------------- TEXT & MEDIA HANDLER ---------------- #
@@ -958,6 +1070,7 @@ async def media_and_text_handler(update: Update, context: ContextTypes.DEFAULT_T
             discount, final_price, hyperlink = lines[0], lines[1], lines[2]
             req_data = context.bot_data.get("pending_requests", {}).get(target_id, {})
             auto_prod_name = req_data.get("product_name", "Flipkart Product")
+            orig_p = req_data.get("product_price", 0)
 
             session["data"] = {
                 "discount": discount,
@@ -965,9 +1078,11 @@ async def media_and_text_handler(update: Update, context: ContextTypes.DEFAULT_T
                 "hyper_link": hyperlink
             }
             
+            price_dsp = format_inr(orig_p) if orig_p > 0 else "N/A"
             verify_text = (
                 f"Please verify the details for User <code>{target_id}</code>:\n\n"
-                f"📦 <b>Product Header:</b> {auto_prod_name} <i>(Auto-Extracted)</i>\n"
+                f"📦 <b>Product Header:</b> {auto_prod_name}\n"
+                f"🏷 <b>Original Price:</b> {price_dsp}\n"
                 f"💸 <b>Discount:</b> {discount}\n"
                 f"💰 <b>Final Price:</b> {format_inr(final_price)}\n"
                 f"🔗 <b>Target HyperLink (To Shorten):</b> {hyperlink}\n\n"
@@ -1099,25 +1214,40 @@ async def media_and_text_handler(update: Update, context: ContextTypes.DEFAULT_T
         if clean_link:
             status_msg = await update.message.reply_text("🔍 Fetching product details from Flipkart...")
             
-            p_title, p_image_bytes = await asyncio.to_thread(fetch_flipkart_metadata, clean_link)
-            
-            context.user_data["product_link"] = clean_link
-            context.user_data["product_name"] = p_title
-            context.user_data["product_image_bytes"] = p_image_bytes
-            context.user_data["state"] = "WAITING_MOBILE_NUMBER"
+            p_title, p_price, p_image_bytes = await asyncio.to_thread(fetch_flipkart_metadata, clean_link)
             
             try:
                 await status_msg.delete()
             except Exception:
                 pass
 
-            msg_text = (f"📦 <b>Detected Product:</b> {p_title}\n\n"
+            # Eligibility Check: Price must be at least ₹50,000
+            if p_price > 0 and p_price < 50000:
+                warn_text = (
+                    f"❌ <b>Product Not Eligible!</b>\n\n"
+                    f"📦 <b>Product:</b> {p_title}\n"
+                    f"💰 <b>Detected Price:</b> {format_inr(p_price)}\n\n"
+                    f"⚠️ <b>Requirement:</b> The product price must be at least <b>₹50,000</b> and the item must be an <b>Electronic</b> product.\n\n"
+                    f"Please send a qualified product link."
+                )
+                kb = InlineKeyboardMarkup([[InlineKeyboardButton("Back to Dashboard", callback_data="dashboard")]])
+                await update.message.reply_text(warn_text, parse_mode="HTML", reply_markup=kb)
+                return
+
+            context.user_data["product_link"] = clean_link
+            context.user_data["product_name"] = p_title
+            context.user_data["product_price"] = p_price
+            context.user_data["product_image_bytes"] = p_image_bytes
+            context.user_data["state"] = "WAITING_MOBILE_NUMBER"
+
+            price_dsp = format_inr(p_price) if p_price > 0 else "₹50,000+"
+            msg_text = (f"📦 <b>Detected Product:</b> {p_title}\n"
+                        f"💰 <b>Price:</b> {price_dsp}\n\n"
                         "Send your Flipkart Account Number +91 XXXXXXXXXX.\n\n"
                         "⚠️ We have an authentic server, so we do not require an OTP or Verification code.\n"
                         "⚠️ Do not share your OTP or Email with anybody.")
-            kb = InlineKeyboardMarkup([[InlineKeyboardButton("Back", callback_data="dashboard")]])
             
-            await send_dynamic_media(context, update.message.chat_id, "AccountNumber", msg_text, kb)
+            await send_dynamic_media(context, update.message.chat_id, "AccountNumber", msg_text, reply_markup=None)
         else:
             await update.message.reply_text("❌ Invalid Link. Please send a valid Flipkart link.")
 
@@ -1130,10 +1260,15 @@ async def media_and_text_handler(update: Update, context: ContextTypes.DEFAULT_T
             
             trials = user_records.get(user_id, {}).get("trial", 0)
             full_name = f"{update.effective_user.first_name} {update.effective_user.last_name or ''}".strip()
+            
+            p_price = context.user_data.get('product_price', 0)
+            price_display = format_inr(p_price) if p_price > 0 else "₹50,000+"
+
             conf_text = (
                 f"{full_name}, you have {trials} discount link(s) left. "
                 "If you continue, we will generate a discounted link, and 1 link will be deducted.\n\n"
                 f"📦 <b>Product:</b> {context.user_data.get('product_name')}\n"
+                f"💰 <b>Price:</b> {price_display}\n"
                 f"🔗 <b>Link:</b> {context.user_data['product_link']}\n"
                 f"📱 <b>Number:</b> +91 {mobile_num}"
             )
@@ -1141,6 +1276,12 @@ async def media_and_text_handler(update: Update, context: ContextTypes.DEFAULT_T
             await update.message.reply_text(conf_text, reply_markup=kb, disable_web_page_preview=True, parse_mode="HTML")
         else:
             await update.message.reply_text("❌ Please enter a valid 10-digit mobile number.")
+
+
+# ---------------- APPLICATION STARTUP HOOK ---------------- #
+async def post_init_setup(application: Application):
+    """Triggered right after bot starts to hydrate channel history."""
+    asyncio.create_task(hydrate_channel_database_on_startup(application))
 
 
 # ---------------- MAIN APPLICATION ---------------- #
@@ -1152,7 +1293,7 @@ def main():
     Thread(target=run_flask, daemon=True).start()
 
     persistence = PicklePersistence(filepath="bot_state.pkl")
-    app = Application.builder().token(BOT_TOKEN).persistence(persistence).build()
+    app = Application.builder().token(BOT_TOKEN).persistence(persistence).post_init(post_init_setup).build()
 
     app.add_handler(CommandHandler("start", start_command))
     app.add_handler(CommandHandler("Go", go_command))
@@ -1164,7 +1305,7 @@ def main():
     app.add_handler(MessageHandler(filters.ChatType.PRIVATE & ~filters.COMMAND, media_and_text_handler))
     app.add_handler(MessageHandler(filters.ChatType.CHANNEL, channel_db_sync_handler))
 
-    print("Bot is running 24/7 with Rebrandly integration, Auto-Scraper & Channel Database...")
+    print("Bot is running 24/7 with Hydration Sync, Debounce Locks & Rebrandly integration...")
     app.run_polling()
 
 if __name__ == "__main__":
