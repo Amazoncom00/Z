@@ -1067,11 +1067,25 @@ async def media_and_text_handler(update: Update, context: ContextTypes.DEFAULT_T
             [InlineKeyboardButton("🏠 Dashboard", callback_data="dashboard")]
         ])
 
-        if code == "ADMINREFFER009":
-            new_trials = current_rec.get("trial", 0) + 9
-            await sync_user_to_channel(context, user_id, current_rec.get("status", "Active"), new_trials, current_rec.get("last_report", 0.0), current_rec.get("refer_code", "None"), current_rec.get("refer_from", "None"), current_rec.get("reward_given", "False"))
+        if code == "VASH9K019S":
+            if current_rec.get("refer_from") != "None":
+                context.user_data["state"] = None
+                await update.message.reply_text("❌ You have already used a Referral Code before!")
+                return
+                
+            new_trials = current_rec.get("trial", 0) + 1
+            await sync_user_to_channel(
+                context, 
+                user_id, 
+                current_rec.get("status", "Active"), 
+                new_trials, 
+                current_rec.get("last_report", 0.0), 
+                current_rec.get("refer_code", "None"), 
+                "VASH9K019S", 
+                current_rec.get("reward_given", "False")
+            )
             context.user_data["state"] = None
-            await update.message.reply_text("✅ <b>Secret Promo Code Accepted!</b>\nYou have received <b>9 Free Discount links</b>.", parse_mode="HTML", reply_markup=start_kb)
+            await update.message.reply_text("✅ <b>Secret Promo Code Accepted!</b>\nYou have received <b>1 Free Discount link</b>.", parse_mode="HTML", reply_markup=start_kb)
             return
 
         referrer_uid = None
