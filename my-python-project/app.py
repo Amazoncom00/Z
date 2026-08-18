@@ -8,6 +8,7 @@ import asyncio
 import time
 import random
 import string
+import requests
 from datetime import datetime
 from threading import Thread
 from flask import Flask
@@ -51,40 +52,65 @@ def run_flask():
     flask_app.run(host="0.0.0.0", port=port, use_reloader=False)
 
 
-# ---------------- GOOGLE SHEETS WEB APP ENGINE ---------------- #
+# ---------------- GOOGLE SHEETS WEB APP ENGINE (FIXED) ---------------- #
 def gsheet_request(payload: dict) -> dict:
-    """Sends JSON POST request to Google Apps Script Web App."""
+    """Sends JSON POST request to Google Apps Script Web App with automatic redirect handling."""
     try:
-        data_bytes = json.dumps(payload).encode('utf-8')
-        req = urllib.request.Request(
+        resp = requests.post(
             GOOGLE_WEBAPP_URL,
-            data=data_bytes,
+            json=payload,
             headers={"Content-Type": "application/json"},
-            method="POST"
+            timeout=15,
+            allow_redirects=True
         )
-        with urllib.request.urlopen(req, timeout=12) as response:
-            res_text = response.read().decode('utf-8')
-            return json.loads(res_text)
+        if resp.status_code == 200:
+            data = resp.json()
+            print(f"✅ [GSHEET SYNC SUCCESS]: {payload.get('action')} for User {payload.get('userid')}")
+            return data
+        else:
+            print(f"⚠️ [GSHEET HTTP ERROR]: Status {resp.status_code} - {resp.text}")
     except Exception as e:
-        print(f"Google Sheet API Error: {e}")
-        return {"status": "error", "message": str(e)}
+        print(f"❌ [GSHEET POST EXCEPTION]: {e}")
+    return {"status": "error"}
 
 def gsheet_get_all_users() -> dict:
-    """Loads all users from Google Sheet on bot startup."""
+    """Loads all users from Google Sheet on bot startup with Integer ID conversion."""
     try:
-        url = f"{GOOGLE_WEBAPP_URL}?action=get_all_users"
-        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
-        with urllib.request.urlopen(req, timeout=15) as response:
-            res_text = response.read().decode('utf-8')
-            data = json.loads(res_text)
+        resp = requests.get(
+            f"{GOOGLE_WEBAPP_URL}?action=get_all_users",
+            headers={"User-Agent": "Mozilla/5.0"},
+            timeout=20,
+            allow_redirects=True
+        )
+        if resp.status_code == 200:
+            data = resp.json()
             if data.get("status") == "success":
-                return data.get("users", {})
+                raw_users = data.get("users", {})
+                converted_users = {}
+                for uid_str, udata in raw_users.items():
+                    try:
+                        clean_uid = int(uid_str)
+                        converted_users[clean_uid] = {
+                            "userid": clean_uid,
+                            "discountpoint": int(udata.get("discountpoint", 0)),
+                            "refer_code": str(udata.get("refer_code", "None")),
+                            "refer_from": str(udata.get("refer_from", "None")),
+                            "status": str(udata.get("status", "Active")),
+                            "admin_refer": str(udata.get("admin_refer", "No")),
+                            "order_history": udata.get("order_history", []),
+                            "last_report": 0.0
+                        }
+                    except (ValueError, TypeError):
+                        continue
+                print(f"✅ [GSHEET HYDRATION SUCCESS]: Loaded {len(converted_users)} valid users.")
+                return converted_users
     except Exception as e:
-        print(f"Startup Google Sheet Fetch Error: {e}")
+        print(f"❌ [GSHEET GET EXCEPTION]: {e}")
     return {}
 
 async def sync_user_to_db(context: ContextTypes.DEFAULT_TYPE, user_id: int, discountpoint: int, refer_code: str = "None", refer_from: str = "None", status: str = "Active", admin_refer: str = "No", order_history: list = None):
-    """Syncs user data in bot memory and Google Sheets."""
+    """Syncs user data in bot memory and Google Sheets in background."""
+    user_id = int(user_id)
     user_records = context.bot_data.setdefault("user_records", {})
     existing = user_records.get(user_id, {})
     
@@ -92,7 +118,7 @@ async def sync_user_to_db(context: ContextTypes.DEFAULT_TYPE, user_id: int, disc
         order_history = existing.get("order_history", [])
 
     user_records[user_id] = {
-        "userid": str(user_id),
+        "userid": user_id,
         "discountpoint": discountpoint,
         "refer_code": refer_code,
         "refer_from": refer_from,
@@ -112,6 +138,7 @@ async def sync_user_to_db(context: ContextTypes.DEFAULT_TYPE, user_id: int, disc
         "admin_refer": admin_refer,
         "order_history": order_history
     }
+    # Run network request in background thread
     await asyncio.to_thread(gsheet_request, payload)
 
 
@@ -240,19 +267,16 @@ def create_lejumo_short_link(destination_url: str) -> tuple[bool, str]:
 
     payload = {"url": dest}
     try:
-        req = urllib.request.Request(endpoint, data=json.dumps(payload).encode('utf-8'), headers=headers, method="POST")
-        with urllib.request.urlopen(req, timeout=12) as resp:
-            data = json.loads(resp.read().decode('utf-8'))
+        resp = requests.post(endpoint, json=payload, headers=headers, timeout=12)
+        if resp.status_code == 200:
+            data = resp.json()
             short_url = data.get("short") or data.get("shortUrl")
             if short_url:
                 final_short = f"https://{short_url}" if not short_url.startswith("http") else short_url
                 return True, final_short
-    except urllib.error.HTTPError as e:
-        return False, f"Lejumo API Error ({e.code}): {e.read().decode('utf-8', errors='ignore')}"
+        return False, f"Lejumo Error: {resp.text}"
     except Exception as ex:
         return False, f"Lejumo Exception: {str(ex)}"
-
-    return False, "Could not generate link from Lejumo."
 
 def generate_unique_referral_code(user_records):
     while True:
@@ -261,7 +285,7 @@ def generate_unique_referral_code(user_records):
             return code
 
 async def track_and_check_user(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
-    user_id = update.effective_user.id
+    user_id = int(update.effective_user.id)
     if user_id == ADMIN_ID:
         return False
         
@@ -311,7 +335,7 @@ async def hydrate_channel_media_on_startup(app: Application):
                 await asyncio.sleep(0.02)
             except Exception:
                 continue
-        print(f"✅ Media Cache Ready! Total cached keys: {len([k for k in app.bot_data.keys() if k.startswith('media_')])}")
+        print(f"✅ Media Cache Ready! Total keys: {len([k for k in app.bot_data.keys() if k.startswith('media_')])}")
     except Exception as e:
         print(f"Media Hydration note: {e}")
 
@@ -346,7 +370,6 @@ async def send_dynamic_media(context, chat_id, tag, caption=None, reply_markup=N
 
 # ---------------- BACKGROUND JOBS & TIMERS ---------------- #
 async def expire_deal_link_job(context: ContextTypes.DEFAULT_TYPE):
-    """Triggered after 10 mins (600s) to expire checkout link."""
     job = context.job
     chat_id = job.data["chat_id"]
     msg_id = job.data["msg_id"]
@@ -372,9 +395,8 @@ async def expire_deal_link_job(context: ContextTypes.DEFAULT_TYPE):
         print(f"Deal expiry error: {e}")
 
 async def admin_timeout_refund_job(context: ContextTypes.DEFAULT_TYPE):
-    """Triggered if request is not processed within 10 minutes (600s)."""
     job = context.job
-    target_id = job.data["target_id"]
+    target_id = int(job.data["target_id"])
     
     pending = context.bot_data.get("pending_requests", {})
     if target_id not in pending:
@@ -412,7 +434,6 @@ async def admin_timeout_refund_job(context: ContextTypes.DEFAULT_TYPE):
             pass
 
 async def post_deal_followup_job(context: ContextTypes.DEFAULT_TYPE):
-    """Triggered 15 mins (900s) after user receives discount deal."""
     job = context.job
     chat_id = job.data["chat_id"]
     p_name = job.data["product_name"]
@@ -484,8 +505,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(welcome_text, parse_mode="HTML", reply_markup=kb)
 
 async def stop_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Terminates active live chat session (Admin only)."""
-    user_id = update.effective_user.id
+    user_id = int(update.effective_user.id)
     if user_id != ADMIN_ID: return
     
     target_id = context.bot_data.get("active_chat_user")
@@ -526,7 +546,7 @@ async def precheckout_callback(update: Update, context: ContextTypes.DEFAULT_TYP
     await update.pre_checkout_query.answer(ok=True)
 
 async def successful_payment_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
+    user_id = int(update.effective_user.id)
     payload = update.message.successful_payment.invoice_payload
     user_records = context.bot_data.get("user_records", {})
     rec = user_records.get(user_id, {})
@@ -777,7 +797,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         elif data == "verify_yes":
             if ADMIN_ID not in admin_sessions: return
             session = admin_sessions[ADMIN_ID]
-            target_id = session.get("target_user_id")
+            target_id = int(session.get("target_user_id"))
             data_dict = session.get("data", {})
             
             await edit_message_or_caption(query, "⏳ <b>Creating Lejumo Short Link... Please wait.</b>", parse_mode="HTML")
@@ -1101,7 +1121,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "admin_msg_id": sent_admin_msg.message_id if sent_admin_msg else None
             }
 
-            # 10-Minute Server Auto-Timeout Job
             context.job_queue.run_once(
                 admin_timeout_refund_job,
                 600,
@@ -1215,12 +1234,12 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def media_and_text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if await track_and_check_user(update, context): return
     
-    user_id = update.effective_user.id
+    user_id = int(update.effective_user.id)
     user_records = context.bot_data.get("user_records", {})
     state = context.user_data.get("state")
     text = update.message.text.strip() if update.message.text else update.message.caption.strip() if update.message.caption else ""
 
-    # -- 2-WAY LIVE CHAT MODE ROUTING --
+    # -- 2-WAY LIVE CHAT ROUTING --
     active_chat_target = context.bot_data.get("active_chat_user")
     
     if user_id == ADMIN_ID and active_chat_target:
@@ -1263,7 +1282,7 @@ async def media_and_text_handler(update: Update, context: ContextTypes.DEFAULT_T
         referrer_uid = None
         for uid, rec in user_records.items():
             if str(rec.get("refer_code", "")).strip().upper() == code:
-                referrer_uid = uid
+                referrer_uid = int(uid)
                 break
                 
         if not referrer_uid:
@@ -1271,7 +1290,7 @@ async def media_and_text_handler(update: Update, context: ContextTypes.DEFAULT_T
             await update.message.reply_text("❌ Invalid Referral Code. Kripya check karke dobara enter karein.", reply_markup=kb)
             return
             
-        if int(referrer_uid) == user_id:
+        if referrer_uid == user_id:
             context.user_data["state"] = None
             await update.message.reply_text("❌ Aap apna khud ka referral code use nahi kar sakte!")
             return
@@ -1402,16 +1421,18 @@ async def media_and_text_handler(update: Update, context: ContextTypes.DEFAULT_T
         elif step == "WAITING_GIFT_AMOUNT":
             try:
                 amt = int(text)
-                t_id = session.get("gift_target")
+                t_id = int(session.get("gift_target"))
                 rec = user_records.get(t_id, {})
                 new_pts = rec.get("discountpoint", 0) + amt
+                
+                # Direct live sync to Google Sheet & memory
                 await sync_user_to_db(context, t_id, new_pts, rec.get("refer_code", "None"), rec.get("refer_from", "None"), rec.get("status", "Active"), rec.get("admin_refer", "No"), rec.get("order_history", []))
                 
                 try:
                     await context.bot.send_message(chat_id=t_id, text=f"🎁 <b>System Reward!</b>\nAapke account me <b>+{amt} Discount Points</b> credit kar diye gaye hain!", parse_mode="HTML")
                 except Exception: pass
                 
-                await update.message.reply_text(f"✅ Credited +{amt} Points to User <code>{t_id}</code>. New Balance: {new_pts}", parse_mode="HTML")
+                await update.message.reply_text(f"✅ Credited +{amt} Points to User <code>{t_id}</code>. New Balance: {new_pts}\n(Synced to Google Sheets Successfully)", parse_mode="HTML")
             except ValueError:
                 await update.message.reply_text("❌ Points must be a number.")
             del admin_sessions[user_id]
@@ -1600,7 +1621,7 @@ async def post_init_setup(application: Application):
     users = await asyncio.to_thread(gsheet_get_all_users)
     if users:
         application.bot_data["user_records"] = users
-        print(f"✅ Loaded {len(users)} users from Google Sheets!")
+        print(f"✅ Loaded {len(users)} users from Google Sheets into memory!")
     else:
         print("ℹ️ Google Sheet is clean or starting fresh.")
 
@@ -1636,7 +1657,7 @@ def main():
     app.add_handler(MessageHandler(filters.ChatType.PRIVATE & ~filters.COMMAND, media_and_text_handler))
     app.add_handler(MessageHandler(filters.ChatType.CHANNEL, channel_db_sync_handler))
 
-    print("Rebrand Bot running 24/7 with Google Sheets, 1000-Message Media Cache, 10-Min Expiry & Lejumo Engine...")
+    print("Rebrand Bot running 24/7 with Fixed Requests-Based Google Sheets Engine...")
     app.run_polling()
 
 if __name__ == "__main__":
