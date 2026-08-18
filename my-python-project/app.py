@@ -35,12 +35,12 @@ GOOGLE_WEBAPP_URL = os.environ.get(
     "https://script.google.com/macros/s/AKfycbzocUCl18JtTH8gGsFESRIR0rqWCG-WlYFjYa3yIdxakSRPP6jkWpxOsxepF46syzXB/exec"
 )
 
-# Global State Memory
+# Global Memory
 admin_sessions = {}
 click_locks = set()
 active_live_chats = {}
 
-# --- Dummy Flask Web Server for 24/7 Hosting ---
+# --- Flask Server for 24/7 Hosting ---
 flask_app = Flask(__name__)
 
 @flask_app.route('/')
@@ -52,9 +52,8 @@ def run_flask():
     flask_app.run(host="0.0.0.0", port=port, use_reloader=False)
 
 
-# ---------------- GOOGLE SHEETS WEB APP ENGINE (FIXED) ---------------- #
+# ---------------- GOOGLE SHEETS WEB APP ENGINE ---------------- #
 def gsheet_request(payload: dict) -> dict:
-    """Sends JSON POST request to Google Apps Script Web App with automatic redirect handling."""
     try:
         resp = requests.post(
             GOOGLE_WEBAPP_URL,
@@ -64,17 +63,12 @@ def gsheet_request(payload: dict) -> dict:
             allow_redirects=True
         )
         if resp.status_code == 200:
-            data = resp.json()
-            print(f"✅ [GSHEET SYNC SUCCESS]: {payload.get('action')} for User {payload.get('userid')}")
-            return data
-        else:
-            print(f"⚠️ [GSHEET HTTP ERROR]: Status {resp.status_code} - {resp.text}")
+            return resp.json()
     except Exception as e:
-        print(f"❌ [GSHEET POST EXCEPTION]: {e}")
+        print(f"❌ [GSHEET ERROR]: {e}")
     return {"status": "error"}
 
 def gsheet_get_all_users() -> dict:
-    """Loads all users from Google Sheet on bot startup with Integer ID conversion."""
     try:
         resp = requests.get(
             f"{GOOGLE_WEBAPP_URL}?action=get_all_users",
@@ -102,14 +96,13 @@ def gsheet_get_all_users() -> dict:
                         }
                     except (ValueError, TypeError):
                         continue
-                print(f"✅ [GSHEET HYDRATION SUCCESS]: Loaded {len(converted_users)} valid users.")
+                print(f"✅ Loaded {len(converted_users)} users from Google Sheets.")
                 return converted_users
     except Exception as e:
-        print(f"❌ [GSHEET GET EXCEPTION]: {e}")
+        print(f"❌ [GSHEET GET ERROR]: {e}")
     return {}
 
 async def sync_user_to_db(context: ContextTypes.DEFAULT_TYPE, user_id: int, discountpoint: int, refer_code: str = "None", refer_from: str = "None", status: str = "Active", admin_refer: str = "No", order_history: list = None):
-    """Syncs user data in bot memory and Google Sheets in background."""
     user_id = int(user_id)
     user_records = context.bot_data.setdefault("user_records", {})
     existing = user_records.get(user_id, {})
@@ -138,11 +131,10 @@ async def sync_user_to_db(context: ContextTypes.DEFAULT_TYPE, user_id: int, disc
         "admin_refer": admin_refer,
         "order_history": order_history
     }
-    # Run network request in background thread
     await asyncio.to_thread(gsheet_request, payload)
 
 
-# ---------------- HELPERS, SCRAPERS & LEJUMO ---------------- #
+# ---------------- ADVANCED FLIPKART SCRAPER ENGINE ---------------- #
 async def edit_message_or_caption(query, text, reply_markup=None, parse_mode="HTML"):
     try:
         if query.message.photo or query.message.video or query.message.document:
@@ -176,21 +168,28 @@ def extract_flipkart_link(text: str) -> str:
     return ""
 
 def fetch_flipkart_metadata(url: str):
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-        "Accept-Language": "en-IN,en-US,en;q=0.9,hi;q=0.8"
-    }
-    final_url = url
+    """
+    Multi-Layer Robust Flipkart Scraper:
+    Handles Short links (fkrt.it), NextJS payloads, JSON-LD, and fallback patterns.
+    """
+    session = requests.Session()
+    session.headers.update({
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.9,hi;q=0.8",
+        "Upgrade-Insecure-Requests": "1"
+    })
+    
     html = ""
+    final_url = url
     try:
-        req = urllib.request.Request(url, headers=headers)
-        with urllib.request.urlopen(req, timeout=12) as response:
-            final_url = response.geturl()
-            html = response.read().decode('utf-8', errors='ignore')
+        resp = session.get(url, timeout=12, allow_redirects=True)
+        final_url = resp.url
+        html = resp.text
     except Exception as e:
-        print(f"Flipkart Scrape Error: {e}")
+        print(f"Scraper Network Error: {e}")
 
+    # 1. TITLE EXTRACTION
     extracted_title = ""
     og_title = re.search(r'<meta\s+(?:property|name)=["\'](?:og:title|twitter:title)["\']\s+content=["\'](.*?)["\']', html, re.IGNORECASE)
     if og_title: extracted_title = og_title.group(1).strip()
@@ -211,42 +210,85 @@ def fetch_flipkart_metadata(url: str):
     if not extracted_title:
         extracted_title = "Flipkart Product"
 
+    # 2. ROBUST PRICE EXTRACTION (5 LAYERS)
     extracted_price = 0
-    selling_price_match = re.search(r'class=["\'][^"\']*(?:Nx9bqj|_30jeq3)[^"\']*["\'][^>]*>₹?\s*([\d,]+)', html)
-    if selling_price_match:
-        clean_p = re.sub(r'\D', '', selling_price_match.group(1))
-        if clean_p and int(clean_p) > 0:
-            extracted_price = int(clean_p)
 
+    # Layer 1: Dedicated Flipkart Selling Price Classes
+    sp_matches = re.findall(r'class=["\'][^"\']*(?:Nx9bqj|_30jeq3|hl05eU|CxhGGd)[^"\']*["\'][^>]*>₹?\s*([\d,]+)', html)
+    for sp in sp_matches:
+        cl_p = re.sub(r'\D', '', sp)
+        if cl_p and int(cl_p) > 0:
+            extracted_price = int(cl_p)
+            break
+
+    # Layer 2: Redux & Initial State JSON
     if not extracted_price:
         fsp_patterns = [
             r'"(?:FSP|SPECIAL_PRICE|finalPrice|discountedPrice|specialPrice)"[^}]*?"(?:value|decimalValue|amount)"\s*:\s*"?(\d+)',
             r'"(?:fsp|specialPrice|offerPrice)"\s*:\s*(\d+)',
-            r'"prices"\s*:\s*\[\s*\{\s*"type"\s*:\s*"FSP"\s*,\s*"value"\s*:\s*(\d+)'
+            r'"prices"\s*:\s*\[\s*\{\s*"type"\s*:\s*"FSP"\s*,\s*"value"\s*:\s*(\d+)',
+            r'"price"\s*:\s*(\d{4,7})'
         ]
         for pat in fsp_patterns:
-            f_match = re.search(pat, html, re.IGNORECASE)
-            if f_match:
-                val = next((x for x in f_match.groups() if x), None)
+            matches = re.findall(pat, html, re.IGNORECASE)
+            for m in matches:
+                val = m if isinstance(m, str) else m[0]
                 if val and int(val) > 0:
                     extracted_price = int(val)
                     break
+            if extracted_price: break
 
+    # Layer 3: Schema JSON-LD (application/ld+json)
+    if not extracted_price:
+        ld_scripts = re.findall(r'<script[^>]*type=["\']application/ld\+json["\'][^>]*>(.*?)</script>', html, re.DOTALL | re.IGNORECASE)
+        for s_text in ld_scripts:
+            try:
+                data = json.loads(s_text.strip())
+                cand = []
+                def get_p(obj):
+                    if isinstance(obj, dict):
+                        if "price" in obj and obj["price"]:
+                            try: cand.append(int(float(str(obj["price"]).replace(',', ''))))
+                            except: pass
+                        if "lowPrice" in obj and obj["lowPrice"]:
+                            try: cand.append(int(float(str(obj["lowPrice"]).replace(',', ''))))
+                            except: pass
+                        for v in obj.values(): get_p(v)
+                    elif isinstance(obj, list):
+                        for item in obj: get_p(item)
+                get_p(data)
+                valid = [p for p in cand if p > 0]
+                if valid:
+                    extracted_price = min(valid)
+                    break
+            except Exception: pass
+
+    # Layer 4: Meta Description Parsing
+    if not extracted_price:
+        meta_desc = re.findall(r'<meta\s+(?:property|name)=["\'](?:og:description|description)["\']\s+content=["\'](.*?)["\']', html, re.IGNORECASE)
+        for d in meta_desc:
+            found = re.findall(r'(?:rs\.?|inr|₹|price:?)\s*([\d,]+)', d, re.IGNORECASE)
+            parsed = [int(re.sub(r'\D', '', f)) for f in found if re.sub(r'\D', '', f)]
+            if parsed:
+                extracted_price = min(parsed)
+                break
+
+    # 3. IMAGE EXTRACTION
     image_url = None
     og_image = re.search(r'<meta\s+(?:property|name)=["\'](?:og:image|twitter:image)["\']\s+content=["\'](.*?)["\']', html, re.IGNORECASE)
     if og_image: image_url = og_image.group(1).strip()
     if not image_url:
-        ruk_match = re.search(r'(https?://rukminim\d*\.flixcart\.com/image/[^\s"\'>]+)', html)
-        if ruk_match: image_url = ruk_match.group(1).strip()
+        ruk = re.search(r'(https?://rukminim\d*\.flixcart\.com/image/[^\s"\'>]+)', html)
+        if ruk: image_url = ruk.group(1).strip()
 
     image_bytes = None
     if image_url:
         try:
-            img_req = urllib.request.Request(image_url, headers=headers)
-            with urllib.request.urlopen(img_req, timeout=10) as img_resp:
-                image_bytes = img_resp.read()
+            img_resp = session.get(image_url, timeout=8)
+            if img_resp.status_code == 200:
+                image_bytes = img_resp.content
         except Exception as img_err:
-            print(f"Error downloading product image: {img_err}")
+            print(f"Image Download Note: {img_err}")
 
     return extracted_title, extracted_price, image_bytes
 
@@ -319,7 +361,6 @@ async def parse_channel_post_content(context_or_app, message):
                 data_store[f"media_{tag}_type"] = "document"
 
 async def hydrate_channel_media_on_startup(app: Application):
-    """Scans up to 1000 messages from DB Channel on startup to load media cache."""
     print("⏳ Scanning Database Channel for media attachments...")
     try:
         probe_msg = await app.bot.send_message(chat_id=DB_CHANNEL_ID, text="🔄 <i>Media Cache Hydration in Progress...</i>", parse_mode="HTML")
@@ -634,6 +675,16 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             kb = InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back", callback_data="adm_back_main")]])
             await edit_message_or_caption(query, "🔍 <b>Send User ID to inspect profile:</b>", reply_markup=kb, parse_mode="HTML")
 
+        elif data.startswith("adm_start_chat_"):
+            target_id = int(data.split("adm_start_chat_")[1])
+            context.bot_data["active_chat_user"] = target_id
+            active_live_chats[target_id] = True
+            kb = InlineKeyboardMarkup([[InlineKeyboardButton("⏹ End Live Chat", callback_data="adm_end_chat_session")]])
+            await edit_message_or_caption(query, f"🟢 <b>2-Way Live Chat Started with User <code>{target_id}</code></b>", parse_mode="HTML", reply_markup=kb)
+            try:
+                await context.bot.send_message(chat_id=target_id, text="💬 <b>Rebrand Official Support Connected!</b> Aap direct yahan message bhej sakte hain.", parse_mode="HTML")
+            except Exception: pass
+
         elif data == "adm_menu_addpoints":
             admin_sessions[ADMIN_ID] = {"step": "WAITING_GIFT_USER_ID"}
             kb = InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back", callback_data="adm_back_main")]])
@@ -668,6 +719,12 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             admin_sessions[ADMIN_ID] = {"step": "WAITING_SPO_LINK", "data": {}}
             kb = InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back", callback_data="adm_back_main")]])
             await edit_message_or_caption(query, "🎁 <b>Send Flipkart Link for Special Offer:</b>", reply_markup=kb, parse_mode="HTML")
+
+        elif data.startswith("sp_grab_"):
+            target_link = data.split("sp_grab_")[1]
+            context.user_data["product_link"] = target_link
+            context.user_data["state"] = "WAITING_MOBILE_NUMBER"
+            await context.bot.send_message(chat_id=chat_id, text="📱 Send your Flipkart Account Mobile Number (+91 XXXXXXXXXX):")
 
         elif data == "adm_menu_end":
             kb = [
@@ -788,7 +845,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             except Exception: pass
             await edit_message_or_caption(query, f"❌ Rejected User <code>{target_id}</code> (Invalid Link).", parse_mode="HTML")
 
-        # -- ADMIN VERIFICATION & LEJUMO SHORTENING --
+        # -- ADMIN VERIFICATION & SHORTENING --
         elif data == "verify_no":
             if ADMIN_ID in admin_sessions:
                 admin_sessions[ADMIN_ID]["step"] = "WAITING_ALL_DETAILS"
@@ -1398,7 +1455,7 @@ async def media_and_text_handler(update: Update, context: ContextTypes.DEFAULT_T
                         f"📦 <b>Recent Orders:</b>{h_text}"
                     )
                     kb = [
-                        [InlineKeyboardButton("💬 Chat with User", callback_data="adm_menu_msg_user")],
+                        [InlineKeyboardButton("💬 Chat with User", callback_data=f"adm_start_chat_{t_id}")],
                         [InlineKeyboardButton("🔙 Back to Master Panel", callback_data="adm_back_main")]
                     ]
                     await update.message.reply_text(card, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(kb))
@@ -1425,7 +1482,6 @@ async def media_and_text_handler(update: Update, context: ContextTypes.DEFAULT_T
                 rec = user_records.get(t_id, {})
                 new_pts = rec.get("discountpoint", 0) + amt
                 
-                # Direct live sync to Google Sheet & memory
                 await sync_user_to_db(context, t_id, new_pts, rec.get("refer_code", "None"), rec.get("refer_from", "None"), rec.get("status", "Active"), rec.get("admin_refer", "No"), rec.get("order_history", []))
                 
                 try:
@@ -1525,8 +1581,9 @@ async def media_and_text_handler(update: Update, context: ContextTypes.DEFAULT_T
         elif step == "WAITING_SPO_OPRICE":
             oprice = text
             offer_text = f"{session['data']['spo_link']}\n<b>{session['data']['spo_name']}</b>\n<s>{session['data']['spo_cprice']}</s> - {session['data']['spo_disc']} = <b>{oprice}</b>"
+            spo_link_val = session['data']['spo_link']
             del admin_sessions[user_id]
-            kb = InlineKeyboardMarkup([[InlineKeyboardButton("Get Offer Now", callback_data="direct_start")]])
+            kb = InlineKeyboardMarkup([[InlineKeyboardButton("Get Offer Now", callback_data=f"sp_grab_{spo_link_val}")]])
             sent = 0
             for u_id, rec in user_records.items():
                 if int(u_id) == ADMIN_ID or str(rec.get("status", "Active")).lower() == "blocked": continue
@@ -1549,7 +1606,7 @@ async def media_and_text_handler(update: Update, context: ContextTypes.DEFAULT_T
             del admin_sessions[user_id]
             return
 
-    # --- REGULAR USER WORKFLOWS ---
+    # --- REGULAR USER WORKFLOWS (WITH BULLETPROOF PRICE VALIDATION) ---
     if state == "WAITING_FLIPKART_LINK" and text:
         clean_link = extract_flipkart_link(text)
         if clean_link:
@@ -1559,7 +1616,24 @@ async def media_and_text_handler(update: Update, context: ContextTypes.DEFAULT_T
             try: await status_msg.delete()
             except Exception: pass
 
-            if p_price > 0 and p_price < 50000:
+            context.user_data["product_link"] = clean_link
+            context.user_data["product_name"] = p_title
+            context.user_data["product_image_bytes"] = p_image_bytes
+
+            # 🌟 BULLETPROOF FIX: Price Agar 0 aayi toh User se Manual Price pucho
+            if p_price == 0:
+                context.user_data["state"] = "WAITING_MANUAL_PRICE"
+                await update.message.reply_text(
+                    f"📦 <b>Detected Product:</b> {p_title}\n\n"
+                    "⚠️ Flipkart server se price auto-detect nahi ho payi.\n"
+                    "<b>Kripya is product ki exact selling price (₹) enter karein:</b>\n"
+                    "<i>(Example: 65000 ya 120000)</i>",
+                    parse_mode="HTML"
+                )
+                return
+
+            # Agar price auto-detect hui par ₹50,000 se kam hai
+            if p_price < 50000:
                 warn_text = (
                     f"❌ <b>Product Eligible Nahi Hai!</b>\n\n"
                     f"📦 <b>Product:</b> {p_title}\n"
@@ -1570,10 +1644,7 @@ async def media_and_text_handler(update: Update, context: ContextTypes.DEFAULT_T
                 await update.message.reply_text(warn_text, parse_mode="HTML", reply_markup=kb)
                 return
 
-            context.user_data["product_link"] = clean_link
-            context.user_data["product_name"] = p_title
             context.user_data["product_price"] = p_price
-            context.user_data["product_image_bytes"] = p_image_bytes
             context.user_data["state"] = "WAITING_MOBILE_NUMBER"
 
             msg_text = (
@@ -1586,6 +1657,36 @@ async def media_and_text_handler(update: Update, context: ContextTypes.DEFAULT_T
             await send_dynamic_media(context, update.message.chat_id, "AccountNumber", msg_text)
         else:
             await update.message.reply_text("❌ Invalid Link. Kripya ek valid Flipkart link bhejein.")
+
+    elif state == "WAITING_MANUAL_PRICE" and text:
+        clean_p = re.sub(r'\D', '', text)
+        if clean_p and int(clean_p) > 0:
+            entered_price = int(clean_p)
+            if entered_price < 50000:
+                warn_text = (
+                    f"❌ <b>Product Eligible Nahi Hai!</b>\n\n"
+                    f"💰 <b>Entered Price:</b> {format_inr(entered_price)}\n\n"
+                    f"⚠️ <b>Requirement:</b> Product price kam se kam <b>₹50,000</b> honi chahiye."
+                )
+                kb = InlineKeyboardMarkup([[InlineKeyboardButton("🏠 Go to Dashboard", callback_data="dashboard")]])
+                await update.message.reply_text(warn_text, parse_mode="HTML", reply_markup=kb)
+                context.user_data["state"] = None
+                return
+
+            context.user_data["product_price"] = entered_price
+            context.user_data["state"] = "WAITING_MOBILE_NUMBER"
+            
+            p_title = context.user_data.get("product_name", "Flipkart Product")
+            msg_text = (
+                f"📦 <b>Product:</b> {p_title}\n"
+                f"💰 <b>Verified Price:</b> {format_inr(entered_price)}\n\n"
+                "Apna Flipkart Account Mobile Number (+91 XXXXXXXXXX) send karein.\n\n"
+                "⚠️ Humara secure server hai, isliye OTP ya Password ki zaroorat nahi hoti.\n"
+                "⚠️ Apna OTP ya Login details kisi ke saath share na karein."
+            )
+            await send_dynamic_media(context, update.message.chat_id, "AccountNumber", msg_text)
+        else:
+            await update.message.reply_text("❌ Kripya valid number me price enter karein (e.g. 75000).")
 
     elif state == "WAITING_MOBILE_NUMBER" and text:
         number_only = re.sub(r'\D', '', text)
@@ -1616,7 +1717,6 @@ async def media_and_text_handler(update: Update, context: ContextTypes.DEFAULT_T
 
 # ---------------- APPLICATION STARTUP HOOK ---------------- #
 async def post_init_setup(application: Application):
-    """Hydrates all users from Google Sheets and loads DB Channel media attachments."""
     print("⏳ Syncing database with Google Sheets Web App...")
     users = await asyncio.to_thread(gsheet_get_all_users)
     if users:
@@ -1625,7 +1725,6 @@ async def post_init_setup(application: Application):
     else:
         print("ℹ️ Google Sheet is clean or starting fresh.")
 
-    # Run Channel Media Scan in Background
     asyncio.create_task(hydrate_channel_media_on_startup(application))
 
 
@@ -1657,7 +1756,7 @@ def main():
     app.add_handler(MessageHandler(filters.ChatType.PRIVATE & ~filters.COMMAND, media_and_text_handler))
     app.add_handler(MessageHandler(filters.ChatType.CHANNEL, channel_db_sync_handler))
 
-    print("Rebrand Bot running 24/7 with Fixed Requests-Based Google Sheets Engine...")
+    print("Rebrand Bot running 24/7 with Fixed Scraper Engine & Zero-Bypass Protection...")
     app.run_polling()
 
 if __name__ == "__main__":
