@@ -37,14 +37,14 @@ GOOGLE_WEBAPP_URL = os.environ.get(
 # Global State Memory
 admin_sessions = {}
 click_locks = set()
-active_live_chats = {}  # {user_id: True} when admin is chatting with user
+active_live_chats = {}
 
-# --- Dummy Flask Web Server for Cloud Hosting (Render/Koyeb/Heroku) ---
+# --- Dummy Flask Web Server for 24/7 Hosting ---
 flask_app = Flask(__name__)
 
 @flask_app.route('/')
 def home():
-    return "Rebrand Bot with Google Sheets & Lejumo is Running 24/7!"
+    return "Rebrand Automated Liquidation Server is Online 24/7!"
 
 def run_flask():
     port = int(os.environ.get("PORT", 8080))
@@ -53,7 +53,7 @@ def run_flask():
 
 # ---------------- GOOGLE SHEETS WEB APP ENGINE ---------------- #
 def gsheet_request(payload: dict) -> dict:
-    """Sends JSON POST request to Google Apps Script Web App URL."""
+    """Sends JSON POST request to Google Apps Script Web App."""
     try:
         data_bytes = json.dumps(payload).encode('utf-8')
         req = urllib.request.Request(
@@ -66,11 +66,11 @@ def gsheet_request(payload: dict) -> dict:
             res_text = response.read().decode('utf-8')
             return json.loads(res_text)
     except Exception as e:
-        print(f"Google Sheet API Request Error: {e}")
+        print(f"Google Sheet API Error: {e}")
         return {"status": "error", "message": str(e)}
 
 def gsheet_get_all_users() -> dict:
-    """Fetches all users from Google Sheet on startup."""
+    """Loads all users from Google Sheet on bot startup."""
     try:
         url = f"{GOOGLE_WEBAPP_URL}?action=get_all_users"
         req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
@@ -80,11 +80,11 @@ def gsheet_get_all_users() -> dict:
             if data.get("status") == "success":
                 return data.get("users", {})
     except Exception as e:
-        print(f"Error fetching all users from Google Sheet: {e}")
+        print(f"Startup Google Sheet Fetch Error: {e}")
     return {}
 
 async def sync_user_to_db(context: ContextTypes.DEFAULT_TYPE, user_id: int, discountpoint: int, refer_code: str = "None", refer_from: str = "None", status: str = "Active", admin_refer: str = "No", order_history: list = None):
-    """Syncs user record in bot_data memory and Google Sheets in background."""
+    """Syncs user data in bot memory and Google Sheets."""
     user_records = context.bot_data.setdefault("user_records", {})
     existing = user_records.get(user_id, {})
     
@@ -115,7 +115,7 @@ async def sync_user_to_db(context: ContextTypes.DEFAULT_TYPE, user_id: int, disc
     await asyncio.to_thread(gsheet_request, payload)
 
 
-# ---------------- HELPERS, SCRAPERS & SHORTENER ---------------- #
+# ---------------- HELPERS, SCRAPERS & LEJUMO ---------------- #
 async def edit_message_or_caption(query, text, reply_markup=None, parse_mode="HTML"):
     try:
         if query.message.photo or query.message.video or query.message.document:
@@ -130,10 +130,8 @@ async def edit_message_or_caption(query, text, reply_markup=None, parse_mode="HT
 
 def format_inr(number_val) -> str:
     num = re.sub(r'\D', '', str(number_val))
-    if not num: 
-        return f"₹{number_val}"
-    if len(num) <= 3: 
-        return f"₹{num}"
+    if not num: return f"₹{number_val}"
+    if len(num) <= 3: return f"₹{num}"
     last_three = num[-3:]
     rest = num[:-3]
     chunks = []
@@ -168,12 +166,10 @@ def fetch_flipkart_metadata(url: str):
 
     extracted_title = ""
     og_title = re.search(r'<meta\s+(?:property|name)=["\'](?:og:title|twitter:title)["\']\s+content=["\'](.*?)["\']', html, re.IGNORECASE)
-    if og_title:
-        extracted_title = og_title.group(1).strip()
+    if og_title: extracted_title = og_title.group(1).strip()
     if not extracted_title:
         title_tag = re.search(r'<title>(.*?)</title>', html, re.IGNORECASE)
-        if title_tag:
-            extracted_title = title_tag.group(1).strip()
+        if title_tag: extracted_title = title_tag.group(1).strip()
 
     if extracted_title:
         extracted_title = re.sub(r':\s*Buy.*$', '', extracted_title, flags=re.IGNORECASE)
@@ -211,12 +207,10 @@ def fetch_flipkart_metadata(url: str):
 
     image_url = None
     og_image = re.search(r'<meta\s+(?:property|name)=["\'](?:og:image|twitter:image)["\']\s+content=["\'](.*?)["\']', html, re.IGNORECASE)
-    if og_image:
-        image_url = og_image.group(1).strip()
+    if og_image: image_url = og_image.group(1).strip()
     if not image_url:
         ruk_match = re.search(r'(https?://rukminim\d*\.flixcart\.com/image/[^\s"\'>]+)', html)
-        if ruk_match:
-            image_url = ruk_match.group(1).strip()
+        if ruk_match: image_url = ruk_match.group(1).strip()
 
     image_bytes = None
     if image_url:
@@ -225,7 +219,7 @@ def fetch_flipkart_metadata(url: str):
             with urllib.request.urlopen(img_req, timeout=10) as img_resp:
                 image_bytes = img_resp.read()
         except Exception as img_err:
-            print(f"Error downloading image: {img_err}")
+            print(f"Error downloading product image: {img_err}")
 
     return extracted_title, extracted_price, image_bytes
 
@@ -258,7 +252,7 @@ def create_lejumo_short_link(destination_url: str) -> tuple[bool, str]:
     except Exception as ex:
         return False, f"Lejumo Exception: {str(ex)}"
 
-    return False, "Could not obtain short link from Lejumo."
+    return False, "Could not generate link from Lejumo."
 
 def generate_unique_referral_code(user_records):
     while True:
@@ -281,27 +275,50 @@ async def track_and_check_user(update: Update, context: ContextTypes.DEFAULT_TYP
     return False
 
 
-# ---------------- CHANNEL MEDIA SYNC ---------------- #
-async def parse_channel_post_content(context: ContextTypes.DEFAULT_TYPE, message):
+# ---------------- CHANNEL STARTUP RECOVERY & MEDIA DISPATCHER ---------------- #
+async def parse_channel_post_content(context_or_app, message):
     if not message: return
     caption = message.caption or message.text or ""
     tags = ["Logo", "EnglishTutorial", "HindiTutorial", "ProductLink", "AccountNumber", "Ready", "NotAvalable"]
+    data_store = getattr(context_or_app, 'bot_data', None) or context_or_app
+
     for tag in tags:
         if tag in caption:
             if message.photo:
-                context.bot_data[f"media_{tag}"] = message.photo[-1].file_id
-                context.bot_data[f"media_{tag}_type"] = "photo"
+                data_store[f"media_{tag}"] = message.photo[-1].file_id
+                data_store[f"media_{tag}_type"] = "photo"
             elif message.video:
-                context.bot_data[f"media_{tag}"] = message.video.file_id
-                context.bot_data[f"media_{tag}_type"] = "video"
+                data_store[f"media_{tag}"] = message.video.file_id
+                data_store[f"media_{tag}_type"] = "video"
             elif message.document:
-                context.bot_data[f"media_{tag}"] = message.document.file_id
-                context.bot_data[f"media_{tag}_type"] = "document"
+                data_store[f"media_{tag}"] = message.document.file_id
+                data_store[f"media_{tag}_type"] = "document"
+
+async def hydrate_channel_media_on_startup(app: Application):
+    """Scans up to 1000 messages from DB Channel on startup to load media cache."""
+    print("⏳ Scanning Database Channel for media attachments...")
+    try:
+        probe_msg = await app.bot.send_message(chat_id=DB_CHANNEL_ID, text="🔄 <i>Media Cache Hydration in Progress...</i>", parse_mode="HTML")
+        latest_id = probe_msg.message_id
+        await app.bot.delete_message(chat_id=DB_CHANNEL_ID, message_id=latest_id)
+
+        start_id = max(1, latest_id - 1000)
+        for mid in range(latest_id - 1, start_id, -1):
+            try:
+                fwd = await app.bot.forward_message(chat_id=DB_CHANNEL_ID, from_chat_id=DB_CHANNEL_ID, message_id=mid)
+                await parse_channel_post_content(app.bot_data, fwd)
+                await app.bot.delete_message(chat_id=DB_CHANNEL_ID, message_id=fwd.message_id)
+                await asyncio.sleep(0.02)
+            except Exception:
+                continue
+        print(f"✅ Media Cache Ready! Total cached keys: {len([k for k in app.bot_data.keys() if k.startswith('media_')])}")
+    except Exception as e:
+        print(f"Media Hydration note: {e}")
 
 async def channel_db_sync_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     post = update.channel_post or update.edited_channel_post
     if not post or post.chat_id != DB_CHANNEL_ID: return
-    await parse_channel_post_content(context, post)
+    await parse_channel_post_content(context.bot_data, post)
 
 async def send_dynamic_media(context, chat_id, tag, caption=None, reply_markup=None):
     file_id = context.bot_data.get(f"media_{tag}")
@@ -327,7 +344,7 @@ async def send_dynamic_media(context, chat_id, tag, caption=None, reply_markup=N
         await context.bot.send_message(chat_id=chat_id, text=caption, reply_markup=reply_markup, parse_mode="HTML")
 
 
-# ---------------- BACKGROUND TIMERS (JOBS) ---------------- #
+# ---------------- BACKGROUND JOBS & TIMERS ---------------- #
 async def expire_deal_link_job(context: ContextTypes.DEFAULT_TYPE):
     """Triggered after 10 mins (600s) to expire checkout link."""
     job = context.job
@@ -339,11 +356,11 @@ async def expire_deal_link_job(context: ContextTypes.DEFAULT_TYPE):
     is_media = job.data.get("is_media", False)
 
     expired_text = (
-        f"⌛ <b>DISCOUNT DEAL EXPIRED!</b>\n"
+        f"⌛ <b>DISCOUNT SESSION EXPIRED!</b>\n"
         f"━━━━━━━━━━━━━━━━━━━━━━\n"
         f"📦 <b>Product:</b> <a href='{orig_link}'>{p_name}</a>\n"
         f"<s>Deal Price: {final_price}</s>\n\n"
-        f"❌ <i>Is discount token ki 10-minute validity khatam ho chuki hai. Standard Flipkart MRP wapas restore ho gayi hai.</i>"
+        f"❌ <i>Is discount session token ki 10-minute checkout window close ho chuki hai. Standard Flipkart MRP wapas restore ho gayi hai.</i>"
     )
     kb = InlineKeyboardMarkup([[InlineKeyboardButton("🏠 Go to Dashboard", callback_data="dashboard")]])
     try:
@@ -355,25 +372,24 @@ async def expire_deal_link_job(context: ContextTypes.DEFAULT_TYPE):
         print(f"Deal expiry error: {e}")
 
 async def admin_timeout_refund_job(context: ContextTypes.DEFAULT_TYPE):
-    """Triggered if Admin doesn't accept/reject user link within 10 minutes (600s)."""
+    """Triggered if request is not processed within 10 minutes (600s)."""
     job = context.job
     target_id = job.data["target_id"]
     
     pending = context.bot_data.get("pending_requests", {})
     if target_id not in pending:
-        return  # Already accepted/rejected
+        return
 
     req_data = pending.pop(target_id, None)
     user_records = context.bot_data.get("user_records", {})
     rec = user_records.get(target_id, {})
     
-    # Refund 1 Point back
     new_points = rec.get("discountpoint", 0) + 1
     await sync_user_to_db(context, target_id, new_points, rec.get("refer_code", "None"), rec.get("refer_from", "None"), rec.get("status", "Active"), rec.get("admin_refer", "No"), rec.get("order_history", []))
 
     msg_text = (
         "⚠️ <b>High Server Traffic!</b>\n\n"
-        "Abhi bohot saare users ek sath service use kar rahe hain, isliye aapki request process nahi ho payi.\n\n"
+        "Abhi bohot saare users ek sath token liquidate kar rahe hain, isliye aapka checkout session generate nahi ho paya.\n\n"
         "✅ <b>Aapka 1 Discount Point safely aapke account me wapas refund kar diya gaya hai.</b>\n"
         "Kripya thodi der baad dobara koshish karein."
     )
@@ -383,21 +399,20 @@ async def admin_timeout_refund_job(context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         print(f"Timeout notify error: {e}")
 
-    # Remove or update admin pending card
-    admin_msg_id = req_data.get("admin_msg_id")
+    admin_msg_id = req_data.get("admin_msg_id") if req_data else None
     if admin_msg_id:
         try:
             await context.bot.edit_message_text(
                 chat_id=ADMIN_ID,
                 message_id=admin_msg_id,
-                text=f"⌛ <b>[10-Min Timeout - Auto Refunded]</b>\nUser <code>{target_id}</code> request timed out and point was refunded.",
+                text=f"⌛ <b>[10-Min Timeout - Auto Refunded]</b>\nUser <code>{target_id}</code> request timed out and 1 Point was refunded.",
                 parse_mode="HTML"
             )
         except Exception:
             pass
 
 async def post_deal_followup_job(context: ContextTypes.DEFAULT_TYPE):
-    """Triggered 15 mins (900s) after user receives discount deal link."""
+    """Triggered 15 mins (900s) after user receives discount deal."""
     job = context.job
     chat_id = job.data["chat_id"]
     p_name = job.data["product_name"]
@@ -406,6 +421,8 @@ async def post_deal_followup_job(context: ContextTypes.DEFAULT_TYPE):
     ref_used = job.data["ref_used"]
     img_bytes = job.data.get("img_bytes")
 
+    ref_display = f"<code>{ref_used}</code>" if ref_used != "None" else "None"
+
     upsell_text = (
         f"🎉 <b>Happy with our service?</b>\n"
         f"━━━━━━━━━━━━━━━━━━━━━━\n"
@@ -413,9 +430,9 @@ async def post_deal_followup_job(context: ContextTypes.DEFAULT_TYPE):
         f"💸 <b>Discount Applied:</b> {discount}\n"
         f"💰 <b>Total Money Saved:</b> {savings} !\n"
         f"━━━━━━━━━━━━━━━━━━━━━━\n"
-        f"🎁 <b>Referral Code Used:</b> <code>{ref_used}</code>\n\n"
+        f"🎁 <b>Referral Code Used:</b> {ref_display}\n\n"
         f"✨ <b>Earn Unlimited Free Discount Points:</b>\n"
-        f"Shop se <b>8 Discount Points</b> pack lijiye aur apna khud ka unique Referral Code unlock kijiye! Friends ko invite karne par unhe 1 Free Point milega aur aapko har purchase par +1 Free Gift Point milega!"
+        f"Shop se <b>8 Discount Points</b> pack lijiye aur apna personal Referral Code unlock kijiye! Friends ko invite karne par unhe 1 Free Point milega aur aapko har purchase par +1 Free Gift Point milega!"
     )
     kb = InlineKeyboardMarkup([
         [InlineKeyboardButton("🛒 Shop Discount Points", callback_data="purchase_menu")],
@@ -429,6 +446,30 @@ async def post_deal_followup_job(context: ContextTypes.DEFAULT_TYPE):
             await context.bot.send_message(chat_id=chat_id, text=upsell_text, parse_mode="HTML", reply_markup=kb)
     except Exception as e:
         print(f"Follow-up job error: {e}")
+
+def parse_datetime(dt_str: str):
+    dt_str = " ".join(dt_str.split()).upper()
+    formats = ["%d/%m/%y %I%p", "%d/%m/%Y %I%p", "%d/%m/%y %I:%M%p", "%d/%m/%Y %I:%M%p"]
+    for fmt in formats:
+        try: return datetime.strptime(dt_str, fmt)
+        except ValueError: continue
+    return None
+
+async def update_countdown_message(context: ContextTypes.DEFAULT_TYPE):
+    job = context.job
+    now = datetime.now()
+    if now >= job.data["end_time"]:
+        try: await context.bot.edit_message_text(chat_id=job.chat_id, message_id=job.data["msg_id"], text=f"🚨 <b>Countdown Finished!</b>\nSale '{job.data['name']}' has ended.", parse_mode="HTML")
+        except: pass
+        job.schedule_removal()
+        return
+    diff = job.data["end_time"] - now
+    h, rem = divmod(diff.seconds, 3600)
+    m, s = divmod(rem, 60)
+    t_str = (f"{diff.days}d " if diff.days > 0 else "") + f"{h}h {m}m {s}s"
+    text = f"⏳ <b>Live Countdown: {job.data['name']}</b>\n\nEnds in: <b>{t_str}</b>"
+    try: await context.bot.edit_message_text(chat_id=job.chat_id, message_id=job.data["msg_id"], text=text, parse_mode="HTML")
+    except: pass
 
 
 # ---------------- COMMAND HANDLERS ---------------- #
@@ -452,7 +493,7 @@ async def stop_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.bot_data["active_chat_user"] = None
         active_live_chats.pop(target_id, None)
         try:
-            await context.bot.send_message(chat_id=target_id, text="⏹ <b>Admin has ended the live chat session.</b>", parse_mode="HTML")
+            await context.bot.send_message(chat_id=target_id, text="⏹ <b>Rebrand Support Session has ended.</b>", parse_mode="HTML")
         except Exception: pass
         await update.message.reply_text(f"✅ Live chat with User <code>{target_id}</code> terminated.", parse_mode="HTML")
     else:
@@ -480,7 +521,7 @@ async def go_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("👑 <b>Admin Master Control Panel</b>\nChoose an action below:", parse_mode="HTML", reply_markup=InlineKeyboardMarkup(kb))
 
 
-# ---------------- TELEGRAM STARS PAYMENT HANDLERS ---------------- #
+# ---------------- TELEGRAM STARS PAYMENTS ---------------- #
 async def precheckout_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.pre_checkout_query.answer(ok=True)
 
@@ -506,14 +547,14 @@ async def successful_payment_callback(update: Update, context: ContextTypes.DEFA
             refer_code = generate_unique_referral_code(user_records)
         
     points += added
-    await update.message.reply_text(f"🎉 <b>Payment Successful!</b>\nAapke account me <b>+{added} Discount Point(s)</b> add kar diye gaye hain.", parse_mode="HTML")
+    await update.message.reply_text(f"🎉 <b>Payment Successful!</b>\nAapke account me <b>+{added} Discount Point(s)</b> credit kar diye gaye hain.", parse_mode="HTML")
     
     if refer_code != "None" and refer_code:
         await context.bot.send_message(
             chat_id=user_id,
             text=(
-                f"🎁 <b>Aapka Referral Code:</b> <code>{refer_code}</code>\n\n"
-                "Ise apne dosto ke saath share karein! Jab wo ise enter karenge toh unhe 1 Free Point milega, aur jab wo koi pack purchase karenge toh aapko +1 Free Discount Point gift milega!"
+                f"🎁 <b>Aapka Personal Referral Code:</b> <code>{refer_code}</code>\n\n"
+                "Ise apne dosto ke saath share karein! Jab wo ise enter karenge toh unhe 1 Free Point milega, aur unki pehli purchase par aapko +1 Free Discount Point reward milega!"
             ),
             parse_mode="HTML"
         )
@@ -525,7 +566,7 @@ async def successful_payment_callback(update: Update, context: ContextTypes.DEFA
                 r_pts = u_rec.get("discountpoint", 0) + 1
                 await sync_user_to_db(context, ref_id, r_pts, u_rec.get("refer_code", "None"), u_rec.get("refer_from", "None"), u_rec.get("status", "Active"), u_rec.get("admin_refer", "No"), u_rec.get("order_history", []))
                 try:
-                    await context.bot.send_message(chat_id=ref_id, text="🎁 <b>Referral Bonus!</b>\nAapke referred friend ne first purchase ki hai! Aapko reward ke roop me <b>+1 Free Discount Point</b> mil gaya hai!", parse_mode="HTML")
+                    await context.bot.send_message(chat_id=ref_id, text="🎁 <b>Referral Bonus Reward!</b>\nAapke referred friend ne first purchase complete ki hai! System dwara aapko <b>+1 Free Discount Point</b> reward mil gaya hai!", parse_mode="HTML")
                 except Exception: pass
                 break
 
@@ -551,7 +592,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
 
     try:
-        # -- ADMIN /GO WORKFLOWS --
+        # -- ADMIN CONTROLS --
         if data == "adm_menu_close":
             try: await query.message.delete()
             except: pass
@@ -589,7 +630,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 context.bot_data["active_chat_user"] = None
                 active_live_chats.pop(target_id, None)
                 try:
-                    await context.bot.send_message(chat_id=target_id, text="⏹ <b>Admin has ended the live chat session.</b>", parse_mode="HTML")
+                    await context.bot.send_message(chat_id=target_id, text="⏹ <b>Rebrand Support Session has ended.</b>", parse_mode="HTML")
                 except Exception: pass
             await edit_message_or_caption(query, "✅ <b>Live chat session ended.</b>", parse_mode="HTML")
 
@@ -625,7 +666,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 [InlineKeyboardButton("⚠️ Confirm Block ALL Users", callback_data="adm_menu_end_all_confirm")],
                 [InlineKeyboardButton("🔙 Cancel / Back", callback_data="adm_back_main")]
             ]
-            await edit_message_or_caption(query, "Are you absolutely sure you want to block all users?", reply_markup=InlineKeyboardMarkup(kb))
+            await edit_message_or_caption(query, "Are you sure you want to block all users?", reply_markup=InlineKeyboardMarkup(kb))
 
         elif data == "adm_menu_end_all_confirm":
             for u_id, rec in list(user_records.items()):
@@ -634,7 +675,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     await asyncio.sleep(0.02)
             await edit_message_or_caption(query, "✅ All users have been blocked.")
 
-        # -- ADMIN ACCEPT WORKFLOW (2 LINES WITH CONTEXT SUMMARY) --
+        # -- ADMIN ACCEPT WORKFLOW --
         elif data.startswith("adm_accept_"):
             target_id = int(data.split("adm_accept_")[1])
             req_data = context.bot_data.get("pending_requests", {}).get(target_id, {})
@@ -713,7 +754,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             ref_points = rec.get("discountpoint", 0) + 1
             await sync_user_to_db(context, target_id, ref_points, rec.get("refer_code", "None"), rec.get("refer_from", "None"), rec.get("status", "Active"), rec.get("admin_refer", "No"), rec.get("order_history", []))
 
-            user_msg = f'Discount not available on <a href="{p_link}">{p_name}</a>. Humne aapka 1 discount point wapas refund kar diya hai.'
+            user_msg = f'Discount not available on <a href="{p_link}">{p_name}</a>. System dwara aapka 1 discount point wapas refund kar diya gaya hai.'
             try:
                 await context.bot.send_message(chat_id=target_id, text=user_msg, parse_mode="HTML", disable_web_page_preview=True)
             except Exception: pass
@@ -752,12 +793,11 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             
             rec = user_records.get(target_id, {})
 
-            # Auto-refund if shortening fails
             if not success:
                 refunded_pts = rec.get("discountpoint", 0) + 1
                 await sync_user_to_db(context, target_id, refunded_pts, rec.get("refer_code", "None"), rec.get("refer_from", "None"), rec.get("status", "Active"), rec.get("admin_refer", "No"), rec.get("order_history", []))
                 try:
-                    await context.bot.send_message(chat_id=target_id, text="⚠️ <b>Link Generation Error!</b>\nServer issue ki wajah se link create nahi ho paya. Humne aapka <b>1 Discount Point refund</b> kar diya hai.", parse_mode="HTML")
+                    await context.bot.send_message(chat_id=target_id, text="⚠️ <b>Session Creation Error!</b>\nServer issue ki wajah se discount link create nahi ho paya. Humne aapka <b>1 Discount Point refund</b> kar diya hai.", parse_mode="HTML")
                 except Exception: pass
                 await edit_message_or_caption(query, f"❌ <b>Lejumo API Failed:</b> {short_or_err}\n\n✅ <b>User ko 1 Point Refund kar diya gaya.</b>", parse_mode="HTML")
                 del admin_sessions[ADMIN_ID]
@@ -765,7 +805,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             final_price_fmt = format_inr(data_dict["final_price"])
             
-            # Record in user order history
             history_list = rec.get("order_history", [])
             history_list.append({
                 "date": datetime.now().strftime("%d/%m/%Y %I:%M%p"),
@@ -802,11 +841,10 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     f"📦 <b>Product:</b> {prod_name}\n"
                     f"💸 <b>Discount:</b> {data_dict['discount']}\n"
                     f"💰 <b>Deal Price:</b> {final_price_fmt}\n\n"
-                    f"Message successfully delivered to User <code>{target_id}</code>.",
+                    f"Session token successfully delivered to User <code>{target_id}</code>.",
                     parse_mode="HTML"
                 )
             except Exception as e:
-                # Auto-refund if message delivery fails
                 refunded_pts = rec.get("discountpoint", 0) + 1
                 await sync_user_to_db(context, target_id, refunded_pts, rec.get("refer_code", "None"), rec.get("refer_from", "None"), rec.get("status", "Active"), rec.get("admin_refer", "No"), history_list)
                 await edit_message_or_caption(query, f"❌ Failed to deliver to User: {e}\n✅ <b>1 Point Refunded.</b>", parse_mode="HTML")
@@ -893,7 +931,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         elif data == "about_us":
             text = (
                 "<b>How Rebrand Works:</b>\n\n"
-                "Jab Flipkart bade sales event (Big Billion Days, GOAT Sale, Diwali Sale) host karta hai, tab heavy traffic ki wajah se bohot saare valid price drops aur checkout tokens drop ho jate hain.\n\n"
+                "Jab Flipkart bade sales event (Big Billion Days, GOAT Sale, Diwali Sale) host karta hai, tab heavy traffic ki wajah se bohot saare valid price drops aur checkout session tokens drop ho jate hain.\n\n"
                 "Rebrand in unhandled session tokens ko capture aur validate karta hai taaki aap sale khatam hone ke baad bhi heavy discounts pa sakein."
             )
             kb = InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back to Dashboard", callback_data="dashboard")]])
@@ -904,15 +942,15 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         elif data == "terms":
             text = (
                 "<b>Terms & Refund Policy:</b>\n\n"
-                "1. Users ko apna wahi active mobile number dena anivarya hai jo unke Flipkart account se linked hai.\n"
+                "1. Users ko apna wahi active mobile number dena zaroori hai jo unke Flipkart account se linked hai.\n"
                 "2. Order seedha aapke diye gaye number wale account par place hoga.\n"
-                "3. Galat ya kisi aur ka number enter karne par hone wale nuksan ke liye Rebrand zimmedar nahi hoga.\n"
+                "3. Galat ya kisi aur ka number enter karne par hone wale nuksan ke liye Rebrand Server zimmedar nahi hoga.\n"
                 "4. Agar valid mobile number ke bawajood discount apply nahi hota ya link fail hota hai, toh aapka point 100% refund kiya jayega."
             )
             kb = InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back to Dashboard", callback_data="dashboard")]])
             try: await query.message.delete()
             except: pass
-            await context.bot.send_message(chat_id=chat_id, text=text, parse_mode="HTML", reply_markup=kb)
+            await context.bot.send_message(chat_id=chat_id, text=text, reply_markup=kb)
 
         elif data == "report_problem":
             kb = InlineKeyboardMarkup([
@@ -964,7 +1002,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             except: pass
             await context.bot.send_message(chat_id=chat_id, text="Apna Referral Code enter karein:", reply_markup=kb)
 
-        # --- ADMIN DIRECT BYPASS & STAR PAYMENTS ---
         elif data.startswith("buy_pack_"):
             try: await query.message.delete()
             except: pass
@@ -980,9 +1017,9 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 
                 await sync_user_to_db(context, ADMIN_ID, new_points, ref_code, current_rec.get("refer_from", "None"), "Active", current_rec.get("admin_refer", "No"), current_rec.get("order_history", []))
                 
-                admin_msg = f"👑 <b>Admin Bypass:</b> +{added} Points added. Total: <b>{new_points}</b> Points."
+                admin_msg = f"👑 <b>Direct Bypass:</b> +{added} Points added. Total: <b>{new_points}</b> Points."
                 if ref_code != "None" and ref_code:
-                    admin_msg += f"\n🎁 <b>Your Referral Code:</b> <code>{ref_code}</code>"
+                    admin_msg += f"\n🎁 <b>Referral Code:</b> <code>{ref_code}</code>"
                 await context.bot.send_message(chat_id=chat_id, text=admin_msg, parse_mode="HTML", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Dashboard", callback_data="dashboard")]]))
                 return
 
@@ -1023,7 +1060,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             try: await query.message.delete()
             except: pass
-            await context.bot.send_message(chat_id=chat_id, text="🔔 <b>Bot notification on rakhein.</b> Hum agle kuch minutes me aapko best discount provide karenge.")
+            await context.bot.send_message(chat_id=chat_id, text="🔔 <b>Bot notification on rakhein.</b> Server agle kuch minutes me aapke liye best discount token verify karega.")
 
             full_name = f"{user.first_name} {user.last_name or ''}".strip()
             p_name = context.user_data.get('product_name', 'Flipkart Product')
@@ -1064,7 +1101,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "admin_msg_id": sent_admin_msg.message_id if sent_admin_msg else None
             }
 
-            # 10-Minute Admin Auto-Timeout Timer (Refunds user if admin is unresponsive)
+            # 10-Minute Server Auto-Timeout Job
             context.job_queue.run_once(
                 admin_timeout_refund_job,
                 600,
@@ -1072,7 +1109,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 name=f"timeout_user_{user.id}"
             )
 
-        # -- POST-APPROVAL USER WORKFLOW --
         elif data == "resend_qualified_msg":
             try: await query.message.delete()
             except: pass
@@ -1133,7 +1169,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             else:
                 sent_msg = await context.bot.send_message(chat_id=chat_id, text=text, parse_mode="HTML", reply_markup=kb, disable_web_page_preview=True)
             
-            # Schedule 10-Min Deal Expiry Job
             if sent_msg:
                 context.job_queue.run_once(
                     expire_deal_link_job,
@@ -1149,7 +1184,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     name=f"deal_expire_{user.id}_{sent_msg.message_id}"
                 )
 
-            # Schedule 15-Min Post-Deal Follow-up & Upsell Job
             rec = user_records.get(user.id, {})
             savings_val = "Special Savings"
             try:
@@ -1177,7 +1211,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         click_locks.discard(lock_key)
 
 
-# ---------------- TEXT & MEDIA MESSAGE HANDLER ---------------- #
+# ---------------- TEXT & MEDIA HANDLER ---------------- #
 async def media_and_text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if await track_and_check_user(update, context): return
     
@@ -1192,9 +1226,9 @@ async def media_and_text_handler(update: Update, context: ContextTypes.DEFAULT_T
     if user_id == ADMIN_ID and active_chat_target:
         try:
             await update.message.copy(chat_id=active_chat_target)
-            await update.message.reply_text(f"📤 <i>Sent to User {active_chat_target}</i>", parse_mode="HTML")
+            await update.message.reply_text(f"📤 <i>Delivered to User {active_chat_target}</i>", parse_mode="HTML")
         except Exception as e:
-            await update.message.reply_text(f"❌ Failed to deliver: {e}")
+            await update.message.reply_text(f"❌ Delivery Error: {e}")
         return
 
     if active_chat_target == user_id:
@@ -1223,7 +1257,7 @@ async def media_and_text_handler(update: Update, context: ContextTypes.DEFAULT_T
             new_pts = current_rec.get("discountpoint", 0) + 1
             await sync_user_to_db(context, user_id, new_pts, current_rec.get("refer_code", "None"), "VASH9K019S", current_rec.get("status", "Active"), "Yes", current_rec.get("order_history", []))
             context.user_data["state"] = None
-            await update.message.reply_text("✅ <b>Secret Promo Code Accepted!</b>\nAapko <b>+1 Free Discount Point</b> mil gaya hai.", parse_mode="HTML", reply_markup=start_kb)
+            await update.message.reply_text("✅ <b>Secret Promo Code Accepted!</b>\nAapko <b>+1 Free Discount Point</b> credit kar diya gaya hai.", parse_mode="HTML", reply_markup=start_kb)
             return
 
         referrer_uid = None
@@ -1250,7 +1284,7 @@ async def media_and_text_handler(update: Update, context: ContextTypes.DEFAULT_T
         new_pts = current_rec.get("discountpoint", 0) + 1
         await sync_user_to_db(context, user_id, new_pts, current_rec.get("refer_code", "None"), code, current_rec.get("status", "Active"), "No", current_rec.get("order_history", []))
         context.user_data["state"] = None
-        await update.message.reply_text("✅ <b>Referral Code Accepted!</b>\nAapko <b>+1 Free Discount Point</b> mil gaya hai.", parse_mode="HTML", reply_markup=start_kb)
+        await update.message.reply_text("✅ <b>Referral Code Accepted!</b>\nAapko <b>+1 Free Discount Point</b> credit kar diya gaya hai.", parse_mode="HTML", reply_markup=start_kb)
         return
 
     # -- VOICE REPORT HANDLER --
@@ -1265,7 +1299,6 @@ async def media_and_text_handler(update: Update, context: ContextTypes.DEFAULT_T
         rec = user_records.get(user_id, {})
         rec["last_report"] = time.time()
         
-        # Log to Google Sheets
         payload = {
             "action": "add_report",
             "userid": str(user_id),
@@ -1279,7 +1312,7 @@ async def media_and_text_handler(update: Update, context: ContextTypes.DEFAULT_T
         await update.message.copy(chat_id=ADMIN_ID)
         
         kb = InlineKeyboardMarkup([[InlineKeyboardButton("🏠 Dashboard", callback_data="dashboard")]])
-        await update.message.reply_text("✅ Aapki report submit ho gayi hai. 24 hours ke andar team aapse contact karegi.", reply_markup=kb)
+        await update.message.reply_text("✅ Aapki report successfully register ho chuki hai. Rebrand Support Node jald hi aapse contact karega.", reply_markup=kb)
         context.user_data["state"] = None
         return
 
@@ -1346,7 +1379,7 @@ async def media_and_text_handler(update: Update, context: ContextTypes.DEFAULT_T
                         f"📦 <b>Recent Orders:</b>{h_text}"
                     )
                     kb = [
-                        [InlineKeyboardButton("💬 Chat with User", callback_data=f"adm_start_chat_{t_id}")],
+                        [InlineKeyboardButton("💬 Chat with User", callback_data="adm_menu_msg_user")],
                         [InlineKeyboardButton("🔙 Back to Master Panel", callback_data="adm_back_main")]
                     ]
                     await update.message.reply_text(card, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(kb))
@@ -1375,10 +1408,10 @@ async def media_and_text_handler(update: Update, context: ContextTypes.DEFAULT_T
                 await sync_user_to_db(context, t_id, new_pts, rec.get("refer_code", "None"), rec.get("refer_from", "None"), rec.get("status", "Active"), rec.get("admin_refer", "No"), rec.get("order_history", []))
                 
                 try:
-                    await context.bot.send_message(chat_id=t_id, text=f"🎁 <b>Surprise Gift!</b>\nAdmin has gifted you <b>+{amt} Discount Points</b>!", parse_mode="HTML")
+                    await context.bot.send_message(chat_id=t_id, text=f"🎁 <b>System Reward!</b>\nAapke account me <b>+{amt} Discount Points</b> credit kar diye gaye hain!", parse_mode="HTML")
                 except Exception: pass
                 
-                await update.message.reply_text(f"✅ Gifted +{amt} Points to User <code>{t_id}</code>. New Balance: {new_pts}", parse_mode="HTML")
+                await update.message.reply_text(f"✅ Credited +{amt} Points to User <code>{t_id}</code>. New Balance: {new_pts}", parse_mode="HTML")
             except ValueError:
                 await update.message.reply_text("❌ Points must be a number.")
             del admin_sessions[user_id]
@@ -1399,7 +1432,7 @@ async def media_and_text_handler(update: Update, context: ContextTypes.DEFAULT_T
                     reply_markup=kb
                 )
                 try:
-                    await context.bot.send_message(chat_id=t_id, text="💬 <b>Our Support Admin has joined the chat. You can reply directly here!</b>", parse_mode="HTML")
+                    await context.bot.send_message(chat_id=t_id, text="💬 <b>Rebrand Official Support Connected!</b> Aap direct yahan message bhej sakte hain.", parse_mode="HTML")
                 except Exception: pass
             except ValueError:
                 await update.message.reply_text("❌ Invalid User ID.")
@@ -1417,6 +1450,71 @@ async def media_and_text_handler(update: Update, context: ContextTypes.DEFAULT_T
                 except: pass
             await update.message.reply_text(f"✅ Announcement sent to {sent} active users.")
             del admin_sessions[user_id]
+            return
+
+        elif step == "WAITING_SALE_DATE":
+            parsed = parse_datetime(text)
+            if not parsed or parsed <= datetime.now():
+                await update.message.reply_text("❌ Invalid format or past time. Try again (e.g., '15/08/26 10AM'):")
+                return
+            session["data"]["end_time"] = parsed
+            session["step"] = "WAITING_SALE_NAME"
+            await update.message.reply_text("Send the End Sale Name:")
+            return
+
+        elif step == "WAITING_SALE_NAME":
+            sale_name = text
+            end_time = session["data"]["end_time"]
+            del admin_sessions[user_id]
+            
+            msg = await update.message.reply_text(f"⏳ Starting countdown for '{sale_name}'...")
+            context.job_queue.run_repeating(
+                update_countdown_message, interval=10, first=1,
+                data={"msg_id": msg.message_id, "end_time": end_time, "name": sale_name},
+                chat_id=user_id, name=f"countdown_{msg.message_id}"
+            )
+            for u_id, rec in user_records.items():
+                if int(u_id) == ADMIN_ID or str(rec.get("status", "Active")).lower() == "blocked": continue
+                try:
+                    await context.bot.send_message(chat_id=int(u_id), text=f"🚨 <b>{sale_name}</b> is ending soon!\nSale closes at: {end_time.strftime('%d/%m/%Y %I:%M %p')}.", parse_mode="HTML")
+                    await asyncio.sleep(0.04)
+                except: pass
+            return
+
+        elif step == "WAITING_SPO_LINK":
+            session["data"]["spo_link"] = text
+            session["step"] = "WAITING_SPO_NAME"
+            await update.message.reply_text("Send Product Name:")
+            return
+        elif step == "WAITING_SPO_NAME":
+            session["data"]["spo_name"] = text
+            session["step"] = "WAITING_SPO_CPRICE"
+            await update.message.reply_text("Send Current Price:")
+            return
+        elif step == "WAITING_SPO_CPRICE":
+            session["data"]["spo_cprice"] = text
+            session["step"] = "WAITING_SPO_DISC"
+            await update.message.reply_text("Send Discount (e.g. 50%):")
+            return
+        elif step == "WAITING_SPO_DISC":
+            session["data"]["spo_disc"] = text
+            session["step"] = "WAITING_SPO_OPRICE"
+            await update.message.reply_text("Send Offer Price:")
+            return
+        elif step == "WAITING_SPO_OPRICE":
+            oprice = text
+            offer_text = f"{session['data']['spo_link']}\n<b>{session['data']['spo_name']}</b>\n<s>{session['data']['spo_cprice']}</s> - {session['data']['spo_disc']} = <b>{oprice}</b>"
+            del admin_sessions[user_id]
+            kb = InlineKeyboardMarkup([[InlineKeyboardButton("Get Offer Now", callback_data="direct_start")]])
+            sent = 0
+            for u_id, rec in user_records.items():
+                if int(u_id) == ADMIN_ID or str(rec.get("status", "Active")).lower() == "blocked": continue
+                try:
+                    await context.bot.send_message(chat_id=int(u_id), text=offer_text, parse_mode="HTML", reply_markup=kb)
+                    sent += 1
+                    await asyncio.sleep(0.04)
+                except: pass
+            await update.message.reply_text(f"✅ Special offer broadcasted to {sent} active users.")
             return
 
         elif step == "WAITING_BLOCK_USER_ID":
@@ -1481,7 +1579,7 @@ async def media_and_text_handler(update: Update, context: ContextTypes.DEFAULT_T
 
             conf_text = (
                 f"{full_name}, aapke paas <b>{trials} Discount Point(s)</b> bache hain.\n"
-                "Aage badhne par 1 point deduct hoga aur discounted deal create hogi:\n\n"
+                "Aage badhne par 1 point deduct hoga aur discounted session create hoga:\n\n"
                 f"📦 <b>Product:</b> {context.user_data.get('product_name')}\n"
                 f"💰 <b>Price:</b> {format_inr(p_price)}\n"
                 f"🔗 <b>Link:</b> {context.user_data['product_link']}\n"
@@ -1497,17 +1595,20 @@ async def media_and_text_handler(update: Update, context: ContextTypes.DEFAULT_T
 
 # ---------------- APPLICATION STARTUP HOOK ---------------- #
 async def post_init_setup(application: Application):
-    """Hydrates all users and settings from Google Sheets and Channel Media."""
-    print("⏳ Syncing in-memory database with Google Sheets Web App...")
+    """Hydrates all users from Google Sheets and loads DB Channel media attachments."""
+    print("⏳ Syncing database with Google Sheets Web App...")
     users = await asyncio.to_thread(gsheet_get_all_users)
     if users:
         application.bot_data["user_records"] = users
-        print(f"✅ Successfully hydrated {len(users)} users from Google Sheets!")
+        print(f"✅ Loaded {len(users)} users from Google Sheets!")
     else:
         print("ℹ️ Google Sheet is clean or starting fresh.")
 
+    # Run Channel Media Scan in Background
+    asyncio.create_task(hydrate_channel_media_on_startup(application))
 
-# ---------------- MAIN APPLICATION ENTRY POINT ---------------- #
+
+# ---------------- MAIN ENTRY POINT ---------------- #
 def main():
     if not BOT_TOKEN:
         print("CRITICAL: TELEGRAM_TOKEN environment variable is missing!")
@@ -1524,7 +1625,7 @@ def main():
     app.add_handler(CommandHandler("stop", stop_command))
     app.add_handler(CommandHandler("unblock", unblock_command))
     
-    # Callback Handlers
+    # Callbacks
     app.add_handler(CallbackQueryHandler(button_handler))
     
     # Telegram Stars Payments
@@ -1535,7 +1636,7 @@ def main():
     app.add_handler(MessageHandler(filters.ChatType.PRIVATE & ~filters.COMMAND, media_and_text_handler))
     app.add_handler(MessageHandler(filters.ChatType.CHANNEL, channel_db_sync_handler))
 
-    print("Bot is successfully running 24/7 with Google Sheets, Live Chat, Auto-Refund & Lejumo Engine...")
+    print("Rebrand Bot running 24/7 with Google Sheets, 1000-Message Media Cache, 10-Min Expiry & Lejumo Engine...")
     app.run_polling()
 
 if __name__ == "__main__":
